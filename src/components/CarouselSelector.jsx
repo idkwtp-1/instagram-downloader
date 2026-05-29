@@ -1,15 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { X, Check, Film, Image, CheckSquare, Square } from 'lucide-react';
 
 const CarouselSelector = ({ isOpen, onClose, items = [], onDownload }) => {
-  const [selectedIndices, setSelectedIndices] = useState([]);
-
-  // When items change or modal opens, select all by default
-  useEffect(() => {
-    if (isOpen && items.length > 0) {
-      setSelectedIndices(items.map((_, index) => index));
-    }
-  }, [isOpen, items]);
+  const [selectedIndices, setSelectedIndices] = useState(() => items.map((_, index) => index));
 
   if (!isOpen) return null;
 
@@ -99,21 +92,33 @@ const CarouselSelector = ({ isOpen, onClose, items = [], onDownload }) => {
                       <Film size={32} />
                     </div>
                   ) : (
-                    <img
-                      src={mediaUrl}
-                      alt={`Slide ${index + 1}`}
-                      className="grid-image"
-                      loading="lazy"
-                      onError={(e) => {
-                        e.target.onerror = null;
-                        // Draw a fallback SVG or symbol
-                        e.target.style.display = 'none';
-                        e.target.parentNode.style.display = 'flex';
-                        e.target.parentNode.style.alignItems = 'center';
-                        e.target.parentNode.style.justifyContent = 'center';
-                        e.target.parentNode.style.background = '#2a2e39';
-                      }}
-                    />
+                    <>
+                      <img
+                        src={mediaUrl}
+                        alt={`Slide ${index + 1}`}
+                        className="grid-image"
+                        loading="lazy"
+                        onError={(e) => {
+                          e.target.style.display = 'none';
+                          const fallbackNode = e.target.nextSibling;
+                          if (fallbackNode) fallbackNode.style.display = 'flex';
+                        }}
+                      />
+                      <div
+                        className="grid-image-fallback"
+                        style={{
+                          display: 'none',
+                          width: '100%',
+                          height: '100%',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          background: '#2a2e39',
+                          color: '#646876',
+                        }}
+                      >
+                        {isVideo ? <Film size={32} /> : <Image size={32} />}
+                      </div>
+                    </>
                   )}
                 </div>
               );

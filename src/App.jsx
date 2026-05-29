@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Instagram,
   Download,
@@ -25,11 +25,34 @@ const ALLOWED_CDN_DOMAINS = [
   'scontent.cdninstagram.com',
 ];
 
-// ─── Security: Verify the media URL comes from a trusted CDN ─────────────────
+// ─── Community Cobalt instances (ordered by score from cobalt.directory) ──────
+// api.cobalt.tools is locked down for programmatic use (requires Turnstile auth)
+const COBALT_INSTANCES = [
+  'https://apicobalt.mgytr.top',
+  'https://dog.kittycat.boo',
+  'https://cobaltapi.squair.xyz',
+  'https://fox.kittycat.boo',
+  'https://cobaltapi.kittycat.boo',
+  'https://api.cobalt.liubquanti.click',
+  'https://api.cobalt.blackcat.sweeux.org',
+  'https://cobaltapi.cjs.nz',
+];
+
+// Extract hostnames from Cobalt instances to allow proxied/tunneled downloads
+const COBALT_HOSTS = COBALT_INSTANCES.map((url) => {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '';
+  }
+}).filter((h) => h.length > 0);
+
+// ─── Security: Verify the media URL comes from a trusted CDN or Cobalt instance ──
 function verifyHost(urlStr) {
   try {
     const hostname = new URL(urlStr).hostname;
-    return ALLOWED_CDN_DOMAINS.some(
+    const allWhitelisted = [...ALLOWED_CDN_DOMAINS, ...COBALT_HOSTS];
+    return allWhitelisted.some(
       (allowed) => hostname === allowed || hostname.endsWith('.' + allowed)
     );
   } catch {
@@ -39,8 +62,8 @@ function verifyHost(urlStr) {
 
 // ─── Security: Validate Instagram URL format ─────────────────────────────────
 function validateInstagramUrl(url) {
-  // Accepts: /p/ /reel/ /tv/ and share links
-  return /^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv|share)\/[\w-]+\/?/i.test(url);
+  // Accepts: /p/ /reel/ /tv/ and share links, optionally followed by query params
+  return /^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv|share)\/[\w-]+\/?(?:\?[\w-=&.%#+]*)?$/i.test(url.trim());
 }
 
 // ─── Direct download via CORS proxy → blob → native save dialog ──────────────
@@ -49,10 +72,40 @@ async function downloadBlob(mediaUrl, filename) {
     throw new Error('Security: Media source domain is not on the approved list.');
   }
 
-  const proxied = `https://corsproxy.io/?url=${encodeURIComponent(mediaUrl)}`;
-  const res = await fetch(proxied);
-  if (!res.ok) {
-    throw new Error(`CDN proxy returned ${res.status}. The link may have expired.`);
+  let res = null;
+  const hostname = new URL(mediaUrl).hostname;
+  const isCobaltHost = COBALT_HOSTS.some(
+    (h) => hostname === h || hostname.endsWith('.' + h)
+  );
+
+  if (isCobaltHost) {
+    try {
+      // Direct fetch from Cobalt (it sets Access-Control-Allow-Origin: *)
+      res = await fetch(mediaUrl);
+    } catch (err) {
+      console.warn('Direct Cobalt fetch failed, falling back to CORS proxy...', err);
+    }
+  }
+
+  if (!res || !res.ok) {
+    // Try Codetabs CORS proxy (supports binary media files)
+    const proxied = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(mediaUrl)}`;
+    try {
+      res = await fetch(proxied);
+    } catch (err) {
+      console.warn('Codetabs proxy failed, trying AllOrigins fallback...', err);
+      // Secondary fallback to AllOrigins raw proxy
+      const backupProxied = `https://api.allorigins.win/raw?url=${encodeURIComponent(mediaUrl)}`;
+      try {
+        res = await fetch(backupProxied);
+      } catch (backupErr) {
+        throw new Error('All CORS proxy attempts failed. Link may be blocked or expired.', { cause: backupErr });
+      }
+    }
+  }
+
+  if (!res || !res.ok) {
+    throw new Error(`Proxy download failed with status ${res ? res.status : 'unknown'}.`);
   }
 
   const blob = await res.blob();
@@ -156,20 +209,25 @@ function App() {
     queueRef.current = merged;
     setUrls(['']);
 
-    if (!processingRef.current) {
+    if (!processingRef.current && !carouselOpen) {
       const startIdx = queue.length;
       processingRef.current = true;
       setIsProcessing(true);
       currentIdxRef.current = startIdx;
-      setTimeout(() => runQueue(startIdx, merged), 80);
+      setTimeout(() => runQueue(startIdx), 80);
     }
   };
 
   // ── Queue runner ──────────────────────────────────────────────────────────
-  const runQueue = async (startIdx, currentQueue) => {
+  const runQueue = async (startIdx) => {
     let idx = startIdx;
 
-    while (idx < currentQueue.length && processingRef.current) {
+    while (processingRef.current) {
+      const currentQueue = queueRef.current;
+      if (idx >= currentQueue.length) {
+        break;
+      }
+
       const item = currentQueue[idx];
       currentIdxRef.current = idx;
       setItemStatus(item.id, 'resolving');
@@ -205,29 +263,57 @@ function App() {
       );
     }
 
-    // ── Cobalt API call ──────────────────────────────────────────────────
-    const apiResponse = await fetch('https://api.cobalt.tools/', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: JSON.stringify({
-        url: item.url,
-        videoQuality: '1080',   // correct field per Cobalt v10 API
-        filenameStyle: 'pretty', // correct field per Cobalt v10 API
-        downloadMode: 'auto',
-        alwaysProxy: true,       // always tunnel so CDN URLs work
-      }),
-    });
+    // ── Cobalt API call (tries each instance in order until one succeeds) ─
+    let apiResponse = null;
+    let lastError = '';
 
-    if (!apiResponse.ok) {
-      if (apiResponse.status === 429) {
-        throw new Error(
-          'Rate limited by Cobalt API. Please wait a moment and try again.'
-        );
+    for (const instance of COBALT_INSTANCES) {
+      try {
+        const res = await fetch(`${instance}/`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            url: item.url,
+            videoQuality: '1080',
+            filenameStyle: 'pretty',
+            downloadMode: 'auto',
+            alwaysProxy: true,
+          }),
+          signal: AbortSignal.timeout(15000), // 15s timeout per instance
+        });
+
+        if (res.status === 429) {
+          lastError = `Rate limited by ${instance}. Trying next…`;
+          continue;
+        }
+
+        if (!res.ok) {
+          // Try to read Cobalt's own error message from the body
+          let cobaltMsg = '';
+          try {
+            const errBody = await res.clone().json();
+            cobaltMsg = errBody?.error?.code || errBody?.text || '';
+          } catch { /* ignore parse errors */ }
+          lastError = cobaltMsg
+            ? `${instance} → ${cobaltMsg}`
+            : `${instance} returned HTTP ${res.status}.`;
+          continue;
+        }
+
+        apiResponse = res;
+        break; // success — stop trying instances
+      } catch (fetchErr) {
+        lastError = `${instance} unreachable: ${fetchErr.message}`;
       }
-      throw new Error(`Cobalt API returned HTTP ${apiResponse.status}.`);
+    }
+
+    if (!apiResponse) {
+      throw new Error(
+        `All Cobalt instances failed. Last error: ${lastError}`
+      );
     }
 
     const data = await apiResponse.json();
@@ -292,7 +378,7 @@ function App() {
     const nextIdx = currentIdxRef.current + 1;
     processingRef.current = true;
     setIsProcessing(true);
-    runQueue(nextIdx, queueRef.current);
+    runQueue(nextIdx);
   };
 
   // ── Carousel cancelled ────────────────────────────────────────────────────
@@ -305,7 +391,7 @@ function App() {
     const nextIdx = currentIdxRef.current + 1;
     processingRef.current = true;
     setIsProcessing(true);
-    runQueue(nextIdx, queueRef.current);
+    runQueue(nextIdx);
   };
 
   // ── Derived UI state ──────────────────────────────────────────────────────
@@ -458,16 +544,18 @@ function App() {
       {/* ── Footer ─────────────────────────────────────────────────────── */}
       <footer className="app-footer">
         <p>&copy; {new Date().getFullYear()} InstaSnip &mdash; for personal and educational use.</p>
-        <p>Please respect creators&apos; intellectual property. Only download content you own or have permission to download.</p>
       </footer>
 
       {/* ── Carousel Picker Modal ───────────────────────────────────────── */}
-      <CarouselSelector
-        isOpen={carouselOpen}
-        items={carouselItems}
-        onClose={handleCarouselCancel}
-        onDownload={handleCarouselDownload}
-      />
+      {carouselOpen && (
+        <CarouselSelector
+          key={carouselQueueId || 'carousel'}
+          isOpen={carouselOpen}
+          items={carouselItems}
+          onClose={handleCarouselCancel}
+          onDownload={handleCarouselDownload}
+        />
+      )}
     </>
   );
 }
