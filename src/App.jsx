@@ -36,6 +36,11 @@ const COBALT_INSTANCES = [
   'https://api.cobalt.liubquanti.click',
   'https://api.cobalt.blackcat.sweeux.org',
   'https://cobaltapi.cjs.nz',
+  'https://melon.clxxped.lol',
+  'https://lime.clxxped.lol',
+  'https://grapefruit.clxxped.lol',
+  'https://rue-cobalt.xenon.zone',
+  'https://nuko-c.meowing.de',
 ];
 
 // Extract hostnames from Cobalt instances to allow proxied/tunneled downloads
@@ -46,6 +51,11 @@ const COBALT_HOSTS = COBALT_INSTANCES.map((url) => {
     return '';
   }
 }).filter((h) => h.length > 0);
+
+// ─── RapidAPI Fallback Config ───────────────────────────────────────────────
+const RAPIDAPI_KEY = '535dfdf4e1msh2ab83333db11e44p1bbe3djsn8c8b360cb723';
+const RAPIDAPI_HOST = 'instagram120.p.rapidapi.com';
+
 
 // ─── Security: Verify the media URL comes from a trusted CDN or Cobalt instance ──
 function verifyHost(urlStr) {
@@ -64,6 +74,19 @@ function verifyHost(urlStr) {
 function validateInstagramUrl(url) {
   // Accepts: /p/ /reel/ /tv/ and share links, optionally followed by query params
   return /^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv|share)\/[\w-]+\/?(?:\?[\w-=&.%#+]*)?$/i.test(url.trim());
+}
+
+// Clean Instagram URLs by removing tracking query parameters
+function cleanInstagramUrl(urlStr) {
+  try {
+    const url = new URL(urlStr.trim());
+    if (url.hostname.includes('instagram.com')) {
+      url.search = '';
+    }
+    return url.toString();
+  } catch {
+    return urlStr.trim();
+  }
 }
 
 // ─── Direct download via CORS proxy → blob → native save dialog ──────────────
@@ -92,6 +115,9 @@ async function downloadBlob(mediaUrl, filename) {
     const proxied = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(mediaUrl)}`;
     try {
       res = await fetch(proxied);
+      if (!res.ok) {
+        throw new Error(`Codetabs proxy returned status ${res.status}`);
+      }
     } catch (err) {
       console.warn('Codetabs proxy failed, trying AllOrigins fallback...', err);
       // Secondary fallback to AllOrigins raw proxy
@@ -99,13 +125,17 @@ async function downloadBlob(mediaUrl, filename) {
       try {
         res = await fetch(backupProxied);
       } catch (backupErr) {
-        throw new Error('All CORS proxy attempts failed. Link may be blocked or expired.', { cause: backupErr });
+        console.warn('All CORS proxy attempts failed. Attempting direct browser download via new tab...', backupErr);
+        window.open(mediaUrl, '_blank');
+        return;
       }
     }
   }
 
   if (!res || !res.ok) {
-    throw new Error(`Proxy download failed with status ${res ? res.status : 'unknown'}.`);
+    console.warn('Proxy download failed. Attempting direct browser download via new tab...');
+    window.open(mediaUrl, '_blank');
+    return;
   }
 
   const blob = await res.blob();
@@ -132,8 +162,43 @@ function parseUrls(text) {
 }
 
 // ─── Guess file extension from URL or MIME type ───────────────────────────────
-function guessExtension(url = '', type = '') {
-  if (type === 'video' || url.includes('.mp4')) return 'mp4';
+function guessExtension(url = '', filenameOrType = '', type = '') {
+  let filename = '';
+  let finalType = type;
+  
+  if (filenameOrType) {
+    if (filenameOrType === 'video' || filenameOrType === 'photo') {
+      finalType = filenameOrType;
+    } else {
+      filename = filenameOrType;
+    }
+  }
+
+  // 1. Try extracting from filename
+  if (filename) {
+    const parts = filename.split('.');
+    if (parts.length > 1) {
+      const ext = parts.pop().toLowerCase();
+      if (['mp4', 'webm', 'jpg', 'jpeg', 'png'].includes(ext)) {
+        return ext === 'jpeg' ? 'jpg' : ext;
+      }
+    }
+  }
+
+  // 2. Try extracting from URL path
+  try {
+    const pathname = new URL(url).pathname;
+    const parts = pathname.split('.');
+    if (parts.length > 1) {
+      const ext = parts.pop().toLowerCase();
+      if (['mp4', 'webm', 'jpg', 'jpeg', 'png'].includes(ext)) {
+        return ext === 'jpeg' ? 'jpg' : ext;
+      }
+    }
+  } catch {}
+
+  // 3. Fallbacks
+  if (finalType === 'video' || url.includes('.mp4')) return 'mp4';
   if (url.includes('.webm')) return 'webm';
   return 'jpg';
 }
@@ -199,7 +264,7 @@ function App() {
 
     const newItems = validUrls.map((url, idx) => ({
       id: `${Date.now()}-${idx}-${Math.random().toString(36).slice(2)}`,
-      url,
+      url: cleanInstagramUrl(url),
       status: 'queued',
       error: '',
     }));
@@ -239,7 +304,11 @@ function App() {
           return;
         }
       } catch (err) {
-        setItemStatus(item.id, 'error', err.message || 'Unknown error.');
+        let friendlyError = err.message || 'Unknown error.';
+        if (friendlyError.includes('error.api.fetch.empty') || friendlyError.includes('error.api.auth.jwt.missing')) {
+          friendlyError = 'Instagram login-wall: This post requires authentication, or is age/region restricted. Public servers cannot access it.';
+        }
+        setItemStatus(item.id, 'error', friendlyError);
       }
 
       // Throttle between downloads to be respectful to the API
@@ -263,92 +332,178 @@ function App() {
       );
     }
 
-    // ── Cobalt API call (tries each instance in order until one succeeds) ─
-    let apiResponse = null;
+    // Try Cobalt first
+    let data = null;
+    let cobaltSucceeded = false;
     let lastError = '';
 
-    for (const instance of COBALT_INSTANCES) {
+    try {
+      let apiResponse = null;
+      for (const instance of COBALT_INSTANCES) {
+        try {
+          const res = await fetch(`${instance}/`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              url: item.url,
+              videoQuality: '1080',
+              filenameStyle: 'pretty',
+              downloadMode: 'auto',
+              alwaysProxy: true,
+            }),
+            signal: AbortSignal.timeout(15000), // 15s timeout per instance
+          });
+
+          if (res.status === 429) {
+            lastError = `Rate limited by ${instance}. Trying next…`;
+            continue;
+          }
+
+          if (!res.ok) {
+            let cobaltMsg = '';
+            try {
+              const errBody = await res.clone().json();
+              cobaltMsg = errBody?.error?.code || errBody?.text || '';
+            } catch {}
+            lastError = cobaltMsg
+              ? `${instance} → ${cobaltMsg}`
+              : `${instance} returned HTTP ${res.status}.`;
+            continue;
+          }
+
+          apiResponse = res;
+          break;
+        } catch (fetchErr) {
+          lastError = `${instance} unreachable: ${fetchErr.message}`;
+        }
+      }
+
+      if (apiResponse) {
+        data = await apiResponse.json();
+        if (data && data.status !== 'error') {
+          cobaltSucceeded = true;
+        } else if (data && data.status === 'error') {
+          lastError = `Cobalt API error: ${data.error?.code || 'unknown'}`;
+        }
+      } else {
+        lastError = lastError || 'All Cobalt instances failed to respond.';
+      }
+    } catch (e) {
+      lastError = e.message;
+    }
+
+    if (cobaltSucceeded && data) {
+      if (data.status === 'picker') {
+        // Carousel / slideshow — show the selector modal
+        processingRef.current = false;
+
+        const slides = data.picker.map((p) => ({
+          type: p.type || (p.url?.includes('.mp4') ? 'video' : 'photo'),
+          url: p.url,
+          thumb: p.thumb || p.url,
+        }));
+
+        setCarouselItems(slides);
+        setCarouselQueueId(item.id);
+        setCarouselOpen(true);
+        return true; // signals pause
+      }
+
+      if (data.status === 'redirect' || data.status === 'tunnel') {
+        setItemStatus(item.id, 'downloading');
+        const ext = guessExtension(data.url, data.filename);
+        const filename = `instagram_${Date.now()}.${ext}`;
+        await downloadBlob(data.url, filename);
+        setItemStatus(item.id, 'success');
+        return false;
+      }
+
+      throw new Error(`Unexpected Cobalt response status: "${data.status}"`);
+    }
+
+    // Cobalt failed, fallback to RapidAPI
+    console.log(`Cobalt failed: ${lastError}. Falling back to RapidAPI...`);
+    
+    try {
+      const targetUrl = `https://${RAPIDAPI_HOST}/api/instagram/links?rapidapi-key=${RAPIDAPI_KEY}`;
+      let res = null;
       try {
-        const res = await fetch(`${instance}/`, {
+        // Try direct fetch first (may succeed from localhost or if CORS is supported)
+        res = await fetch(targetUrl, {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            url: item.url,
-            videoQuality: '1080',
-            filenameStyle: 'pretty',
-            downloadMode: 'auto',
-            alwaysProxy: true,
-          }),
-          signal: AbortSignal.timeout(15000), // 15s timeout per instance
+            url: item.url
+          })
         });
-
-        if (res.status === 429) {
-          lastError = `Rate limited by ${instance}. Trying next…`;
-          continue;
-        }
-
-        if (!res.ok) {
-          // Try to read Cobalt's own error message from the body
-          let cobaltMsg = '';
-          try {
-            const errBody = await res.clone().json();
-            cobaltMsg = errBody?.error?.code || errBody?.text || '';
-          } catch { /* ignore parse errors */ }
-          lastError = cobaltMsg
-            ? `${instance} → ${cobaltMsg}`
-            : `${instance} returned HTTP ${res.status}.`;
-          continue;
-        }
-
-        apiResponse = res;
-        break; // success — stop trying instances
-      } catch (fetchErr) {
-        lastError = `${instance} unreachable: ${fetchErr.message}`;
+      } catch (directErr) {
+        console.warn('Direct RapidAPI fetch failed, trying corsproxy.io...', directErr);
+        const proxiedUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+        res = await fetch(proxiedUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            url: item.url
+          })
+        });
       }
+
+      if (!res.ok) {
+        throw new Error(`RapidAPI returned status ${res.status}`);
+      }
+
+      const rapidData = await res.json();
+
+      // Parse RapidAPI format
+      if (!Array.isArray(rapidData) || rapidData.length === 0) {
+        throw new Error('RapidAPI returned invalid or empty data.');
+      }
+
+      const slides = [];
+      for (const mediaItem of rapidData) {
+        if (mediaItem.urls && mediaItem.urls.length > 0) {
+          const targetUrl = mediaItem.urls[0].url;
+          const ext = mediaItem.urls[0].extension || '';
+          const type = (ext === 'mp4' || mediaItem.urls[0].name?.toLowerCase().includes('video')) ? 'video' : 'photo';
+
+          slides.push({
+            type,
+            url: targetUrl,
+            thumb: mediaItem.pictureUrl || targetUrl
+          });
+        }
+      }
+
+      if (slides.length === 0) {
+        throw new Error('No download links found in RapidAPI response.');
+      }
+
+      if (slides.length === 1) {
+        setItemStatus(item.id, 'downloading');
+        const slide = slides[0];
+        const ext = guessExtension(slide.url, slide.type);
+        const filename = `instagram_${Date.now()}.${ext}`;
+        await downloadBlob(slide.url, filename);
+        setItemStatus(item.id, 'success');
+        return false;
+      } else {
+        // Carousel / slideshow — show the selector modal
+        processingRef.current = false;
+        setCarouselItems(slides);
+        setCarouselQueueId(item.id);
+        setCarouselOpen(true);
+        return true; // signals pause
+      }
+    } catch (rapidErr) {
+      throw new Error(`RapidAPI fallback also failed: ${rapidErr.message} (Cobalt error: ${lastError})`);
     }
-
-    if (!apiResponse) {
-      throw new Error(
-        `All Cobalt instances failed. Last error: ${lastError}`
-      );
-    }
-
-    const data = await apiResponse.json();
-
-    if (data.status === 'error') {
-      const code = data.error?.code || 'unknown';
-      throw new Error(`Cobalt API error: ${code}`);
-    }
-
-    if (data.status === 'picker') {
-      // Carousel / slideshow — show the selector modal
-      processingRef.current = false;
-
-      const slides = data.picker.map((p) => ({
-        type: p.type || (p.url?.includes('.mp4') ? 'video' : 'photo'),
-        url: p.url,
-        thumb: p.thumb || p.url,
-      }));
-
-      setCarouselItems(slides);
-      setCarouselQueueId(item.id);
-      setCarouselOpen(true);
-      return true; // signals pause
-    }
-
-    if (data.status === 'redirect' || data.status === 'tunnel') {
-      setItemStatus(item.id, 'downloading');
-      const ext = guessExtension(data.url);
-      const filename = `instagram_${Date.now()}.${ext}`;
-      await downloadBlob(data.url, filename);
-      setItemStatus(item.id, 'success');
-      return false;
-    }
-
-    throw new Error(`Unexpected Cobalt response status: "${data.status}"`);
   };
 
   // ── Carousel download confirmed ───────────────────────────────────────────
