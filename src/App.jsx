@@ -231,7 +231,9 @@ function guessExtension(url = '', filenameOrType = '', type = '') {
         return ext === 'jpeg' ? 'jpg' : ext;
       }
     }
-  } catch {}
+  } catch {
+    /* ignore invalid url */
+  }
 
   // 3. Fallbacks
   if (finalType === 'video' || url.includes('.mp4')) return 'mp4';
@@ -255,6 +257,7 @@ function App() {
   // Refs to avoid stale closures inside async loops
   const processingRef = useRef(false);
   const queueRef = useRef([]);
+  const currentIdxRef = useRef(-1);
   // PWA install prompt state
   const [installPrompt, setInstallPrompt] = useState(null);
 
@@ -454,7 +457,9 @@ function App() {
             try {
               const errBody = await res.clone().json();
               cobaltMsg = errBody?.error?.code || errBody?.text || '';
-            } catch {}
+            } catch {
+              /* ignore json parse failure */
+            }
             lastError = cobaltMsg
               ? `${instance} → ${cobaltMsg}`
               : `${instance} returned HTTP ${res.status}.`;
@@ -591,7 +596,7 @@ function App() {
         return true; // signals pause
       }
     } catch (rapidErr) {
-      throw new Error(`RapidAPI fallback also failed: ${rapidErr.message} (Cobalt error: ${lastError})`);
+      throw new Error(`RapidAPI fallback also failed: ${rapidErr.message} (Cobalt error: ${lastError})`, { cause: rapidErr });
     }
   };
 
