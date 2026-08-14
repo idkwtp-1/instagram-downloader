@@ -114,21 +114,18 @@ function cleanInstagramUrl(urlStr) {
   }
 }
 
-// ─── Direct download via CORS proxy / direct tunnel → native save dialog ──────
+// ─── Direct download via direct tunnel / blob save ────────────────────────────
 async function downloadBlob(mediaUrl, filename) {
   if (!verifyHost(mediaUrl)) {
     throw new Error('Security: Media source domain is not on the approved list.');
   }
 
   const isMobile = typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
-  const hostname = new URL(mediaUrl).hostname;
-  const isCobaltHost = COBALT_HOSTS.some(
-    (h) => hostname === h || hostname.endsWith('.' + h)
-  );
 
-  // 1. If on mobile and it's a direct Cobalt tunnel, Cobalt already sends Content-Disposition: attachment.
-  // Direct anchor navigation triggers native OS download prompt without memory exhaustion.
-  if (isMobile && isCobaltHost) {
+  // 1. On mobile devices:
+  // Trigger direct native download immediately.
+  // Cobalt tunnels send Content-Disposition: attachment, prompting the OS download sheet directly without RAM exhaustion.
+  if (isMobile) {
     try {
       const anchor = document.createElement('a');
       anchor.href = mediaUrl;
@@ -139,39 +136,21 @@ async function downloadBlob(mediaUrl, filename) {
       document.body.removeChild(anchor);
       return;
     } catch (e) {
-      console.warn('Mobile direct anchor click failed, trying blob...', e);
+      console.warn('Mobile direct anchor click failed:', e);
     }
   }
 
-  // 2. Fetch as Blob (ideal for desktop where browser can stream blob to disk with custom filename)
+  // 2. On desktop: Try direct fetch with a 5s timeout to stream as Blob with custom filename
   let res = null;
-
-  if (isCobaltHost) {
-    try {
-      res = await fetch(mediaUrl);
-    } catch (err) {
-      console.warn('Direct Cobalt fetch failed, falling back to CORS proxy...', err);
-    }
+  try {
+    res = await fetch(mediaUrl, {
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    console.warn('Direct media fetch failed (CORS or timeout), using native download trigger:', err);
   }
 
-  if (!res || !res.ok) {
-    // Try Codetabs CORS proxy (supports binary media files)
-    const proxied = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(mediaUrl)}`;
-    try {
-      res = await fetch(proxied);
-      if (!res.ok) throw new Error(`Codetabs proxy returned status ${res.status}`);
-    } catch (err) {
-      console.warn('Codetabs proxy failed, trying AllOrigins fallback...', err);
-      const backupProxied = `https://api.allorigins.win/raw?url=${encodeURIComponent(mediaUrl)}`;
-      try {
-        res = await fetch(backupProxied);
-      } catch (backupErr) {
-        console.warn('All CORS proxy attempts failed. Attempting direct browser download...', backupErr);
-      }
-    }
-  }
-
-  // If blob fetch succeeded, create blob URL and trigger download
+  // If blob fetch succeeded, create blob URL and trigger save dialog
   if (res && res.ok) {
     try {
       const blob = await res.blob();
@@ -186,11 +165,11 @@ async function downloadBlob(mediaUrl, filename) {
       setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
       return;
     } catch (blobErr) {
-      console.warn('Blob URL download failed, falling back to direct navigation...', blobErr);
+      console.warn('Blob conversion failed, falling back to direct navigation...', blobErr);
     }
   }
 
-  // Fallback: direct download link trigger
+  // 3. Universal Fallback: trigger native browser download
   const anchor = document.createElement('a');
   anchor.href = mediaUrl;
   anchor.download = filename;
@@ -390,40 +369,44 @@ function App() {
   // ── Queue runner ──────────────────────────────────────────────────────────
   const runQueue = async (startIdx) => {
     let idx = startIdx;
+    let shouldPause = false;
 
-    while (processingRef.current) {
-      const currentQueue = queueRef.current;
-      if (idx >= currentQueue.length) {
-        break;
-      }
-
-      const item = currentQueue[idx];
-      currentIdxRef.current = idx;
-      setItemStatus(item.id, 'resolving');
-
-      try {
-        const needsPause = await processItem(item);
-        if (needsPause) {
-          // Carousel modal is open — pause queue until user responds
-          return;
+    try {
+      while (processingRef.current) {
+        const currentQueue = queueRef.current;
+        if (idx >= currentQueue.length) {
+          break;
         }
-      } catch (err) {
-        let friendlyError = err.message || 'Unknown error.';
-        if (friendlyError.includes('error.api.fetch.empty')) {
-          friendlyError = 'Instagram login-wall: This post requires authentication, or is age/region restricted. Public servers cannot access it.';
+
+        const item = currentQueue[idx];
+        currentIdxRef.current = idx;
+        setItemStatus(item.id, 'resolving');
+
+        try {
+          const needsPause = await processItem(item);
+          if (needsPause) {
+            // Carousel modal is open — pause queue until user responds
+            shouldPause = true;
+            return;
+          }
+        } catch (err) {
+          let friendlyError = err.message || 'Unknown error.';
+          if (friendlyError.includes('error.api.fetch.empty')) {
+            friendlyError = 'Instagram login-wall: This post requires authentication, or is age/region restricted. Public servers cannot access it.';
+          }
+          setItemStatus(item.id, 'error', friendlyError);
         }
-        setItemStatus(item.id, 'error', friendlyError);
+
+        // Throttle between downloads to be respectful to the API
+        await new Promise((r) => setTimeout(r, 800));
+        idx++;
       }
-
-      // Throttle between downloads to be respectful to the API
-      await new Promise((r) => setTimeout(r, 1200));
-      idx++;
-    }
-
-    // Queue exhausted or stopped
-    if (processingRef.current) {
-      setIsProcessing(false);
-      processingRef.current = false;
+    } finally {
+      // Guaranteed safety: If not paused by carousel, reset processing state
+      if (!shouldPause) {
+        setIsProcessing(false);
+        processingRef.current = false;
+      }
     }
   };
 
@@ -543,7 +526,8 @@ function App() {
           },
           body: JSON.stringify({
             url: item.url
-          })
+          }),
+          signal: AbortSignal.timeout(8000),
         });
       } catch (directErr) {
         console.warn('Direct RapidAPI fetch failed, trying corsproxy.io...', directErr);
@@ -555,7 +539,8 @@ function App() {
           },
           body: JSON.stringify({
             url: item.url
-          })
+          }),
+          signal: AbortSignal.timeout(8000),
         });
       }
 
