@@ -13,34 +13,37 @@ import {
   Film,
   ImageIcon,
   Layers,
+  ClipboardPaste,
 } from 'lucide-react';
 import CarouselSelector from './components/CarouselSelector';
 import './App.css';
 
-// ─── Security: Whitelisted CDN domains ───────────────────────────────────────
+// ─── Security: Whitelisted CDN & Cobalt Tunnel Domains ───────────────────────
 const ALLOWED_CDN_DOMAINS = [
   'cdninstagram.com',
   'instagram.com',
   'fbcdn.net',
   'scontent.cdninstagram.com',
+  'scontent.net',
+  'facebook.com',
+  'akamaihd.net',
+  'kittycat.boo',
+  'xenon.zone',
+  'cjs.nz',
+  'liubquanti.click',
+  'meowing.de',
+  'clxxped.lol',
+  'squair.xyz',
+  'mgytr.top',
 ];
 
-// ─── Community Cobalt instances (ordered by score from cobalt.directory) ──────
-// api.cobalt.tools is locked down for programmatic use (requires Turnstile auth)
+// ─── Verified Fast Community Cobalt Instances ────────────────────────────────
 const COBALT_INSTANCES = [
-  'https://apicobalt.mgytr.top',
-  'https://dog.kittycat.boo',
-  'https://cobaltapi.squair.xyz',
-  'https://fox.kittycat.boo',
-  'https://cobaltapi.kittycat.boo',
-  'https://api.cobalt.liubquanti.click',
-  'https://api.cobalt.blackcat.sweeux.org',
-  'https://cobaltapi.cjs.nz',
-  'https://melon.clxxped.lol',
-  'https://lime.clxxped.lol',
-  'https://grapefruit.clxxped.lol',
   'https://rue-cobalt.xenon.zone',
-  'https://nuko-c.meowing.de',
+  'https://cobaltapi.kittycat.boo',
+  'https://dog.kittycat.boo',
+  'https://cobaltapi.cjs.nz',
+  'https://api.cobalt.liubquanti.click',
 ];
 
 // Extract hostnames from Cobalt instances to allow proxied/tunneled downloads
@@ -56,7 +59,6 @@ const COBALT_HOSTS = COBALT_INSTANCES.map((url) => {
 const RAPIDAPI_KEY = '535dfdf4e1msh2ab83333db11e44p1bbe3djsn8c8b360cb723';
 const RAPIDAPI_HOST = 'instagram120.p.rapidapi.com';
 
-
 // ─── Security: Verify the media URL comes from a trusted CDN or Cobalt instance ──
 function verifyHost(urlStr) {
   try {
@@ -70,17 +72,39 @@ function verifyHost(urlStr) {
   }
 }
 
-// ─── Security: Validate Instagram URL format ─────────────────────────────────
-function validateInstagramUrl(url) {
-  // Accepts: /p/ /reel/ /tv/ and share links, optionally followed by query params
-  return /^https?:\/\/(?:www\.)?instagram\.com\/(?:p|reel|tv|share)\/[\w-]+\/?(?:\?[\w-=&.%#+]*)?$/i.test(url.trim());
+// ─── Robust Instagram URL Extraction & Cleaning (handles mobile share text/commas) ──
+function extractInstagramUrl(input) {
+  if (!input || typeof input !== 'string') return '';
+  const match = input.match(/https?:\/\/(?:www\.|m\.)?instagram\.com\/(?:[^\s"'<>,]+)/i);
+  if (!match) return input.trim();
+  let urlStr = match[0];
+  // Remove any trailing punctuation commonly attached on mobile (commas, periods, brackets)
+  urlStr = urlStr.replace(/[.,;:)\]}>]+$/, '');
+  return urlStr;
 }
 
-// Clean Instagram URLs by removing tracking query parameters
+// ─── Validate Instagram URL format ───────────────────────────────────────────
+function validateInstagramUrl(url) {
+  if (!url) return false;
+  try {
+    const extracted = extractInstagramUrl(url);
+    const parsed = new URL(extracted);
+    const isInsta = parsed.hostname.includes('instagram.com') || parsed.hostname === 'ig.me';
+    if (!isInsta) return false;
+    return /\/(?:p|reel|reels|tv|share|stories)\/[\w-]+/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+// Clean Instagram URLs by normalizing /reels/ and removing tracking query parameters
 function cleanInstagramUrl(urlStr) {
   try {
-    const url = new URL(urlStr.trim());
-    if (url.hostname.includes('instagram.com')) {
+    const extracted = extractInstagramUrl(urlStr);
+    const url = new URL(extracted);
+    if (url.hostname.includes('instagram.com') || url.hostname === 'ig.me') {
+      // Normalize /reels/ to /reel/
+      url.pathname = url.pathname.replace(/\/reels\//i, '/reel/');
       url.search = '';
     }
     return url.toString();
@@ -89,21 +113,40 @@ function cleanInstagramUrl(urlStr) {
   }
 }
 
-// ─── Direct download via CORS proxy → blob → native save dialog ──────────────
+// ─── Direct download via CORS proxy / direct tunnel → native save dialog ──────
 async function downloadBlob(mediaUrl, filename) {
   if (!verifyHost(mediaUrl)) {
     throw new Error('Security: Media source domain is not on the approved list.');
   }
 
-  let res = null;
+  const isMobile = typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
   const hostname = new URL(mediaUrl).hostname;
   const isCobaltHost = COBALT_HOSTS.some(
     (h) => hostname === h || hostname.endsWith('.' + h)
   );
 
+  // 1. If on mobile and it's a direct Cobalt tunnel, Cobalt already sends Content-Disposition: attachment.
+  // Direct anchor navigation triggers native OS download prompt without memory exhaustion.
+  if (isMobile && isCobaltHost) {
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = mediaUrl;
+      anchor.download = filename;
+      anchor.target = '_self';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      return;
+    } catch (e) {
+      console.warn('Mobile direct anchor click failed, trying blob...', e);
+    }
+  }
+
+  // 2. Fetch as Blob (ideal for desktop where browser can stream blob to disk with custom filename)
+  let res = null;
+
   if (isCobaltHost) {
     try {
-      // Direct fetch from Cobalt (it sets Access-Control-Allow-Origin: *)
       res = await fetch(mediaUrl);
     } catch (err) {
       console.warn('Direct Cobalt fetch failed, falling back to CORS proxy...', err);
@@ -115,50 +158,63 @@ async function downloadBlob(mediaUrl, filename) {
     const proxied = `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(mediaUrl)}`;
     try {
       res = await fetch(proxied);
-      if (!res.ok) {
-        throw new Error(`Codetabs proxy returned status ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Codetabs proxy returned status ${res.status}`);
     } catch (err) {
       console.warn('Codetabs proxy failed, trying AllOrigins fallback...', err);
-      // Secondary fallback to AllOrigins raw proxy
       const backupProxied = `https://api.allorigins.win/raw?url=${encodeURIComponent(mediaUrl)}`;
       try {
         res = await fetch(backupProxied);
       } catch (backupErr) {
-        console.warn('All CORS proxy attempts failed. Attempting direct browser download via new tab...', backupErr);
-        window.open(mediaUrl, '_blank');
-        return;
+        console.warn('All CORS proxy attempts failed. Attempting direct browser download...', backupErr);
       }
     }
   }
 
-  if (!res || !res.ok) {
-    console.warn('Proxy download failed. Attempting direct browser download via new tab...');
-    window.open(mediaUrl, '_blank');
-    return;
+  // If blob fetch succeeded, create blob URL and trigger download
+  if (res && res.ok) {
+    try {
+      const blob = await res.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = blobUrl;
+      anchor.download = filename;
+      anchor.style.display = 'none';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 15000);
+      return;
+    } catch (blobErr) {
+      console.warn('Blob URL download failed, falling back to direct navigation...', blobErr);
+    }
   }
 
-  const blob = await res.blob();
-  const blobUrl = URL.createObjectURL(blob);
-
+  // Fallback: direct download link trigger
   const anchor = document.createElement('a');
-  anchor.href = blobUrl;
+  anchor.href = mediaUrl;
   anchor.download = filename;
+  anchor.target = isMobile ? '_self' : '_blank';
+  anchor.rel = 'noopener noreferrer';
   anchor.style.display = 'none';
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);
-
-  // Small delay before revoking so browser can start the download
-  setTimeout(() => URL.revokeObjectURL(blobUrl), 3000);
 }
 
-// ─── Parse a textarea blob into individual URLs ───────────────────────────────
+// ─── Parse pasted text into individual URLs ──────────────────────────────────
 function parseUrls(text) {
-  return text
-    .split(/[\n,]/)
-    .map((u) => u.trim())
-    .filter((u) => u.length > 0);
+  if (!text) return [];
+  const lines = text.split(/[\n,]/).map((u) => u.trim()).filter(Boolean);
+  const result = [];
+  for (const line of lines) {
+    const extracted = extractInstagramUrl(line);
+    if (extracted && validateInstagramUrl(extracted)) {
+      result.push(cleanInstagramUrl(extracted));
+    } else if (line.length > 0) {
+      result.push(line);
+    }
+  }
+  return result.length > 0 ? result : [text.trim()];
 }
 
 // ─── Guess file extension from URL or MIME type ───────────────────────────────
@@ -242,6 +298,24 @@ function App() {
     });
   };
 
+  // Handle quick paste button click (reading clipboard API directly)
+  const handleQuickPaste = async (index) => {
+    try {
+      const pasted = await navigator.clipboard.readText();
+      if (!pasted || !pasted.trim()) return;
+      const parsed = parseUrls(pasted);
+      if (parsed.length === 0) return;
+      setUrls((prev) => {
+        const copy = [...prev];
+        copy.splice(index, 1, ...parsed);
+        return copy;
+      });
+    } catch (err) {
+      console.warn('Clipboard access denied or failed: ', err);
+      alert('Clipboard access blocked by browser. Please paste using Ctrl+V / Cmd+V.');
+    }
+  };
+
   // ── Queue helpers ─────────────────────────────────────────────────────────
   const setItemStatus = useCallback((id, status, error = '', extra = {}) => {
     setQueue((prev) =>
@@ -305,7 +379,7 @@ function App() {
         }
       } catch (err) {
         let friendlyError = err.message || 'Unknown error.';
-        if (friendlyError.includes('error.api.fetch.empty') || friendlyError.includes('error.api.auth.jwt.missing')) {
+        if (friendlyError.includes('error.api.fetch.empty')) {
           friendlyError = 'Instagram login-wall: This post requires authentication, or is age/region restricted. Public servers cannot access it.';
         }
         setItemStatus(item.id, 'error', friendlyError);
@@ -354,7 +428,7 @@ function App() {
               downloadMode: 'auto',
               alwaysProxy: true,
             }),
-            signal: AbortSignal.timeout(15000), // 15s timeout per instance
+            signal: AbortSignal.timeout(7000), // 7s timeout per instance
           });
 
           if (res.status === 429) {
@@ -417,7 +491,7 @@ function App() {
         const ext = guessExtension(data.url, data.filename);
         const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(data.url, filename);
-        setItemStatus(item.id, 'success');
+        setItemStatus(item.id, 'success', '', { downloadUrl: data.url, downloadName: filename });
         return false;
       }
 
@@ -491,7 +565,7 @@ function App() {
         const ext = guessExtension(slide.url, slide.type);
         const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(slide.url, filename);
-        setItemStatus(item.id, 'success');
+        setItemStatus(item.id, 'success', '', { downloadUrl: slide.url, downloadName: filename });
         return false;
       } else {
         // Carousel / slideshow — show the selector modal
@@ -524,7 +598,10 @@ function App() {
         await downloadBlob(slide.url, filename);
       }
 
-      setItemStatus(carouselQueueId, 'success');
+      setItemStatus(carouselQueueId, 'success', '', {
+        downloadUrl: selected[0]?.url,
+        downloadName: `instagram_${Date.now()}_carousel`
+      });
     } catch (err) {
       setItemStatus(carouselQueueId, 'error', err.message);
     }
@@ -602,17 +679,30 @@ function App() {
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  {urls.length > 1 && (
+                  <div className="url-input-actions">
                     <button
                       type="button"
-                      className="remove-url-btn"
-                      onClick={() => removeUrl(i)}
+                      className="paste-url-btn"
+                      onClick={() => handleQuickPaste(i)}
                       disabled={isProcessing}
-                      aria-label="Remove URL"
+                      title="Paste from clipboard"
+                      aria-label="Paste URL"
                     >
-                      <X size={15} />
+                      <ClipboardPaste size={15} />
                     </button>
-                  )}
+                    {urls.length > 1 && (
+                      <button
+                        type="button"
+                        className="remove-url-btn"
+                        onClick={() => removeUrl(i)}
+                        disabled={isProcessing}
+                        title="Remove URL"
+                        aria-label="Remove URL"
+                      >
+                        <X size={15} />
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -689,6 +779,19 @@ function App() {
                 </div>
                 {item.status === 'error' && (
                   <p className="error-text">{item.error}</p>
+                )}
+                {item.status === 'success' && item.downloadUrl && (
+                  <div className="card-actions-success">
+                    <a
+                      href={item.downloadUrl}
+                      download={item.downloadName || 'instagram_media'}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="btn-card-save"
+                    >
+                      <Download size={13} /> Save / Open File
+                    </a>
+                  </div>
                 )}
               </li>
             ))}

@@ -228,7 +228,7 @@ body::after {
   background: rgba(0,0,0,0.28);
   border: 1.5px solid rgba(255,255,255,0.09);
   border-radius: var(--radius-lg);
-  padding: 13px 44px 13px 40px;
+  padding: 13px 76px 13px 40px;
   color: var(--text-1);
   font-family: 'Plus Jakarta Sans', sans-serif;
   font-size: 0.95rem;
@@ -243,9 +243,16 @@ body::after {
 }
 .url-input:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.remove-url-btn {
+.url-input-actions {
   position: absolute;
-  right: 10px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.paste-url-btn,
+.remove-url-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -257,8 +264,9 @@ body::after {
   cursor: pointer;
   transition: color 0.2s, background 0.2s;
 }
-.remove-url-btn:hover { color: var(--error); background: rgba(244,63,94,0.1); }
-.remove-url-btn:disabled { pointer-events: none; }
+.paste-url-btn:hover { color: var(--info); background: rgba(59,130,246,0.12); }
+.remove-url-btn:hover { color: var(--error); background: rgba(244,63,94,0.12); }
+.paste-url-btn:disabled, .remove-url-btn:disabled { pointer-events: none; opacity: 0.4; }
 
 /* Add URL button */
 .add-url-btn {
@@ -442,6 +450,35 @@ body::after {
   font-size: 0.84rem;
   color: var(--error);
   font-weight: 500;
+}
+
+.card-actions-success {
+  display: flex;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.btn-card-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.28);
+  color: #34d399;
+  text-decoration: none;
+  transition: all 0.2s ease;
+}
+
+.btn-card-save:hover {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: rgba(16, 185, 129, 0.45);
+  color: #6ee7b7;
+  transform: translateY(-1px);
 }
 
 /* ─── Spinner ───────────────────────────────────────────────────────────────── */
@@ -656,4 +693,6 @@ body::after {
   .btn-primary { min-width: unset; width: 100%; }
   .actions-panel { flex-direction: column; align-items: stretch; }
   .btn-secondary { justify-content: center; }
+  .paste-url-btn, .remove-url-btn { width: 32px; height: 32px; }
+  .url-input { padding-right: 82px; }
 }
