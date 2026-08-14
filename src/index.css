@@ -166,6 +166,22 @@ body::after {
   letter-spacing: 0.2px;
 }
 
+.chip-install {
+  cursor: pointer;
+  background: rgba(134, 59, 255, 0.16);
+  border-color: rgba(134, 59, 255, 0.35);
+  color: #c49aff;
+  transition: all 0.2s ease;
+}
+
+.chip-install:hover {
+  background: rgba(134, 59, 255, 0.28);
+  border-color: rgba(134, 59, 255, 0.55);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px -2px rgba(134, 59, 255, 0.4);
+}
+
 /* ─── Main Card ─────────────────────────────────────────────────────────────── */
 .main-card {
   background: var(--surface);

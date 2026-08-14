@@ -14,6 +14,7 @@ import {
   ImageIcon,
   Layers,
   ClipboardPaste,
+  Smartphone,
 } from 'lucide-react';
 import CarouselSelector from './components/CarouselSelector';
 import './App.css';
@@ -275,7 +276,36 @@ function App() {
   // Refs to avoid stale closures inside async loops
   const processingRef = useRef(false);
   const queueRef = useRef([]);
-  const currentIdxRef = useRef(-1);
+  // PWA install prompt state
+  const [installPrompt, setInstallPrompt] = useState(null);
+
+  useEffect(() => {
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setInstallPrompt(e);
+    };
+
+    const handleAppInstalled = () => {
+      setInstallPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+    };
+  }, []);
+
+  const handleInstallClick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    if (choice.outcome === 'accepted') {
+      setInstallPrompt(null);
+    }
+  };
 
   useEffect(() => { queueRef.current = queue; }, [queue]);
 
@@ -650,6 +680,16 @@ function App() {
           <span className="chip"><Film size={13} /> Videos &amp; Reels</span>
           <span className="chip"><ImageIcon size={13} /> Photos</span>
           <span className="chip"><Layers size={13} /> Carousels</span>
+          {installPrompt && (
+            <button
+              type="button"
+              className="chip chip-install"
+              onClick={handleInstallClick}
+              title="Install InstaSnip to your home screen or desktop"
+            >
+              <Smartphone size={13} /> Install App
+            </button>
+          )}
         </div>
       </header>
 
