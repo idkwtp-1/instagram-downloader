@@ -10,7 +10,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "file-saver": "^2.0.5",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
+    "puppeteer": "^25.9.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

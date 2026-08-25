@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import JSZip from 'jszip';
+import { saveAs } from 'file-saver';
 import {
+
   Instagram,
   Download,
   Trash2,
@@ -610,18 +613,43 @@ function App() {
     try {
       const selected = selectedIndices.map((i) => carouselItems[i]);
 
-      for (let i = 0; i < selected.length; i++) {
-        const slide = selected[i];
+      if (selected.length === 1) {
+        // Single item, just download it directly
+        const slide = selected[0];
         const ext = guessExtension(slide.url, slide.type);
-        const filename = `instagram_${Date.now()}_${i + 1}.${ext}`;
-
+        const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(slide.url, filename);
+        setItemStatus(carouselQueueId, 'success', '', {
+          downloadUrl: slide.url,
+          downloadName: filename
+        });
+      } else {
+        // Multiple items, bundle into ZIP
+        const zip = new JSZip();
+        
+        for (let i = 0; i < selected.length; i++) {
+          const slide = selected[i];
+          const ext = guessExtension(slide.url, slide.type);
+          const filename = `instagram_${Date.now()}_${i + 1}.${ext}`;
+          
+          // Fetch the blob to add to zip
+          const response = await fetch(slide.url);
+          if (!response.ok) throw new Error(`Failed to fetch media for zipping: ${response.statusText}`);
+          const blob = await response.blob();
+          zip.file(filename, blob);
+        }
+        
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipFilename = `instagram_carousel_${Date.now()}.zip`;
+        const zipUrl = URL.createObjectURL(zipBlob);
+        
+        saveAs(zipBlob, zipFilename);
+        
+        setItemStatus(carouselQueueId, 'success', '', {
+          downloadUrl: zipUrl,
+          downloadName: zipFilename
+        });
       }
-
-      setItemStatus(carouselQueueId, 'success', '', {
-        downloadUrl: selected[0]?.url,
-        downloadName: `instagram_${Date.now()}_carousel`
-      });
     } catch (err) {
       setItemStatus(carouselQueueId, 'error', err.message);
     }
