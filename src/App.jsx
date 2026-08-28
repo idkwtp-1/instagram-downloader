@@ -18,6 +18,7 @@ import {
   Layers,
   ClipboardPaste,
   Smartphone,
+  RefreshCw,
 } from 'lucide-react';
 import CarouselSelector from './components/CarouselSelector';
 import './App.css';
@@ -372,6 +373,23 @@ function App() {
     }
   };
 
+  // ── Retry handler ─────────────────────────────────────────────────────────
+  const handleRetry = (id) => {
+    // Reset status to queued
+    setItemStatus(id, 'queued', '');
+    
+    // Find the item's index to restart queue from there if it's earlier than current
+    const targetIdx = queueRef.current.findIndex(item => item.id === id);
+    if (targetIdx === -1) return;
+    
+    if (!processingRef.current && !carouselOpen) {
+      processingRef.current = true;
+      setIsProcessing(true);
+      currentIdxRef.current = targetIdx;
+      setTimeout(() => runQueue(targetIdx), 80);
+    }
+  };
+
   // ── Queue runner ──────────────────────────────────────────────────────────
   const runQueue = async (startIdx) => {
     let idx = startIdx;
@@ -385,6 +403,12 @@ function App() {
         }
 
         const item = currentQueue[idx];
+        
+        if (item.status === 'success' || item.status === 'resolving' || item.status === 'downloading') {
+          idx++;
+          continue;
+        }
+        
         currentIdxRef.current = idx;
         setItemStatus(item.id, 'resolving');
 
@@ -447,7 +471,7 @@ function App() {
               downloadMode: 'auto',
               alwaysProxy: true,
             }),
-            signal: AbortSignal.timeout(7000), // 7s timeout per instance
+            signal: AbortSignal.timeout(12000), // increased to 12s per instance
           });
 
           if (res.status === 429) {
@@ -535,7 +559,7 @@ function App() {
           body: JSON.stringify({
             url: item.url
           }),
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(15000), // increased to 15s
         });
       } catch (directErr) {
         console.warn('Direct RapidAPI fetch failed, trying corsproxy.io...', directErr);
@@ -548,7 +572,7 @@ function App() {
           body: JSON.stringify({
             url: item.url
           }),
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(15000), // increased to 15s
         });
       }
 
@@ -617,6 +641,7 @@ function App() {
         // Single item, just download it directly
         const slide = selected[0];
         const ext = guessExtension(slide.url, slide.type);
+        // eslint-disable-next-line react-hooks/purity
         const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(slide.url, filename);
         setItemStatus(carouselQueueId, 'success', '', {
@@ -630,6 +655,7 @@ function App() {
         for (let i = 0; i < selected.length; i++) {
           const slide = selected[i];
           const ext = guessExtension(slide.url, slide.type);
+          // eslint-disable-next-line react-hooks/purity
           const filename = `instagram_${Date.now()}_${i + 1}.${ext}`;
           
           // Fetch the blob to add to zip
@@ -640,6 +666,7 @@ function App() {
         }
         
         const zipBlob = await zip.generateAsync({ type: 'blob' });
+        // eslint-disable-next-line react-hooks/purity
         const zipFilename = `instagram_carousel_${Date.now()}.zip`;
         const zipUrl = URL.createObjectURL(zipBlob);
         
@@ -836,7 +863,19 @@ function App() {
                   </span>
                 </div>
                 {item.status === 'error' && (
-                  <p className="error-text">{item.error}</p>
+                  <>
+                    <p className="error-text">{item.error}</p>
+                    <div className="card-actions-error">
+                      <button
+                        type="button"
+                        className="btn-card-retry"
+                        onClick={() => handleRetry(item.id)}
+                        title="Retry this download"
+                      >
+                        <RefreshCw size={13} /> Retry
+                      </button>
+                    </div>
+                  </>
                 )}
                 {item.status === 'success' && item.downloadUrl && (
                   <div className="card-actions-success">

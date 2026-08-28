@@ -488,6 +488,7 @@ body::after {
   color: #34d399;
   text-decoration: none;
   transition: all 0.2s ease;
+  outline: none;
 }
 
 .btn-card-save:hover {
@@ -495,6 +496,47 @@ body::after {
   border-color: rgba(16, 185, 129, 0.45);
   color: #6ee7b7;
   transform: translateY(-1px);
+}
+
+.btn-card-save:focus-visible {
+  outline: 2px solid #6ee7b7;
+  outline-offset: 2px;
+}
+
+.card-actions-error {
+  display: flex;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.btn-card-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(244, 63, 94, 0.12);
+  border: 1px solid rgba(244, 63, 94, 0.28);
+  color: #fb7185;
+  text-decoration: none;
+  transition: all 0.2s ease;
+  cursor: pointer;
+  outline: none;
+}
+
+.btn-card-retry:hover {
+  background: rgba(244, 63, 94, 0.22);
+  border-color: rgba(244, 63, 94, 0.45);
+  color: #fda4af;
+  transform: translateY(-1px);
+}
+
+.btn-card-retry:focus-visible {
+  outline: 2px solid #fda4af;
+  outline-offset: 2px;
 }
 
 /* ─── Spinner ───────────────────────────────────────────────────────────────── */
