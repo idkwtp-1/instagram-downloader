@@ -390,6 +390,27 @@ function App() {
     }
   };
 
+  const handleRetryAll = () => {
+    const failedItems = queueRef.current.filter(i => i.status === 'error');
+    if (failedItems.length === 0) return;
+
+    let lowestIdx = queueRef.current.length;
+    
+    // Reset all failed to queued and find the earliest failed index
+    failedItems.forEach(item => {
+      setItemStatus(item.id, 'queued', '');
+      const idx = queueRef.current.findIndex(i => i.id === item.id);
+      if (idx < lowestIdx) lowestIdx = idx;
+    });
+
+    if (!processingRef.current && !carouselOpen) {
+      processingRef.current = true;
+      setIsProcessing(true);
+      currentIdxRef.current = lowestIdx;
+      setTimeout(() => runQueue(lowestIdx), 80);
+    }
+  };
+
   // ── Queue runner ──────────────────────────────────────────────────────────
   const runQueue = async (startIdx) => {
     let idx = startIdx;
@@ -471,7 +492,7 @@ function App() {
               downloadMode: 'auto',
               alwaysProxy: true,
             }),
-            signal: AbortSignal.timeout(12000), // increased to 12s per instance
+            signal: AbortSignal.timeout(25000), // increased to 25s per instance
           });
 
           if (res.status === 429) {
@@ -559,7 +580,7 @@ function App() {
           body: JSON.stringify({
             url: item.url
           }),
-          signal: AbortSignal.timeout(15000), // increased to 15s
+          signal: AbortSignal.timeout(30000), // increased to 30s
         });
       } catch (directErr) {
         console.warn('Direct RapidAPI fetch failed, trying corsproxy.io...', directErr);
@@ -572,7 +593,7 @@ function App() {
           body: JSON.stringify({
             url: item.url
           }),
-          signal: AbortSignal.timeout(15000), // increased to 15s
+          signal: AbortSignal.timeout(30000), // increased to 30s
         });
       }
 
@@ -837,64 +858,85 @@ function App() {
       </main>
 
       {/* ── Queue Section ───────────────────────────────────────────────── */}
-      {queue.length > 0 && (
-        <section className="main-card queue-section" aria-label="Download queue">
-          <div className="queue-header">
-            <h3 className="queue-title">Download Queue</h3>
-            <span className="media-count">
-              {completedCount} / {queue.length} done
-            </span>
-          </div>
+      {queue.length > 0 && (() => {
+        const failedCount = queue.filter(item => item.status === 'error').length;
+        
+        return (
+          <section className="main-card queue-section" aria-label="Download queue">
+            <div className="queue-header">
+              <h3 className="queue-title">Download Queue</h3>
+              <span className="media-count">
+                {completedCount} / {queue.length} done
+              </span>
+            </div>
 
-          <ul className="queue-list">
-            {queue.map((item, idx) => (
-              <li key={item.id} className={`queue-card status-${item.status}`}>
-                <div className="card-top">
-                  <div className="card-url-info">
-                    <span className="card-index">#{idx + 1}</span>
-                    <span className="card-url" title={item.url}>{item.url}</span>
-                  </div>
-                  <span className={`badge badge-${item.status}`}>
-                    {item.status === 'queued' && 'Queued'}
-                    {item.status === 'resolving' && <><Loader2 className="spinner" size={12} /> Resolving</>}
-                    {item.status === 'downloading' && <><Loader2 className="spinner" size={12} /> Downloading</>}
-                    {item.status === 'success' && <><CheckCircle size={12} /> Done</>}
-                    {item.status === 'error' && <><AlertCircle size={12} /> Error</>}
-                  </span>
-                </div>
-                {item.status === 'error' && (
-                  <>
-                    <p className="error-text">{item.error}</p>
-                    <div className="card-actions-error">
-                      <button
-                        type="button"
-                        className="btn-card-retry"
-                        onClick={() => handleRetry(item.id)}
-                        title="Retry this download"
-                      >
-                        <RefreshCw size={13} /> Retry
-                      </button>
+            <ul className="queue-list">
+              {queue.map((item, idx) => (
+                <li key={item.id} className={`queue-card status-${item.status}`}>
+                  <div className="card-top">
+                    <div className="card-url-info">
+                      <span className="card-index">#{idx + 1}</span>
+                      <span className="card-url" title={item.url}>{item.url}</span>
                     </div>
-                  </>
-                )}
-                {item.status === 'success' && item.downloadUrl && (
-                  <div className="card-actions-success">
-                    <a
-                      href={item.downloadUrl}
-                      download={item.downloadName || 'instagram_media'}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="btn-card-save"
-                    >
-                      <Download size={13} /> Save / Open File
-                    </a>
+                    <span className={`badge badge-${item.status}`}>
+                      {item.status === 'queued' && 'Queued'}
+                      {item.status === 'resolving' && <><Loader2 className="spinner" size={12} /> Resolving</>}
+                      {item.status === 'downloading' && <><Loader2 className="spinner" size={12} /> Downloading</>}
+                      {item.status === 'success' && <><CheckCircle size={12} /> Done</>}
+                      {item.status === 'error' && <><AlertCircle size={12} /> Error</>}
+                    </span>
                   </div>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+                  {item.status === 'error' && (
+                    <>
+                      <p className="error-text">{item.error}</p>
+                      {failedCount === 1 && (
+                        <div className="card-actions-error">
+                          <button
+                            type="button"
+                            className="btn-card-retry"
+                            // eslint-disable-next-line react-hooks/refs
+                            onClick={() => handleRetry(item.id)}
+                            title="Retry this download"
+                          >
+                            <RefreshCw size={13} /> Retry
+                          </button>
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {item.status === 'success' && item.downloadUrl && (
+                    <div className="card-actions-success">
+                      <a
+                        href={item.downloadUrl}
+                        download={item.downloadName || 'instagram_media'}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="btn-card-save"
+                      >
+                        <Download size={13} /> Save / Open File
+                      </a>
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+            
+            {failedCount > 1 && (
+              <div className="queue-footer-actions" style={{ marginTop: '20px', textAlign: 'center' }}>
+                <button
+                  type="button"
+                  className="btn-card-retry"
+                  style={{ padding: '8px 24px', fontSize: '0.9rem' }}
+                  onClick={handleRetryAll}
+                  title="Retry all failed downloads"
+                >
+                  <RefreshCw size={15} /> Retry All Failed ({failedCount})
+                </button>
+              </div>
+            )}
+          </section>
+        );
+      })()}
 
       {/* ── Footer ─────────────────────────────────────────────────────── */}
       <footer className="app-footer">
