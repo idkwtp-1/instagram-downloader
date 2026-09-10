@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
 import { saveAs } from 'file-saver';
 import {
-
   Instagram,
   Download,
   Trash2,
@@ -19,8 +18,11 @@ import {
   ClipboardPaste,
   Smartphone,
   RefreshCw,
+  Archive,
+  Sparkles,
 } from 'lucide-react';
 import CarouselSelector from './components/CarouselSelector';
+import ElapsedTimer from './components/ElapsedTimer';
 import './App.css';
 
 // ─── Security: Whitelisted CDN & Cobalt Tunnel Domains ───────────────────────
@@ -250,8 +252,32 @@ function guessExtension(url = '', filenameOrType = '', type = '') {
 // ═════════════════════════════════════════════════════════════════════════════
 function App() {
   const [urls, setUrls] = useState(['']); // array of URL strings
-  const [queue, setQueue] = useState([]);
+  const [queue, setQueue] = useState(() => {
+    try {
+      const saved = localStorage.getItem('instasnip_queue_v2');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item) => {
+            // Reset any interrupted items so they can be run or retried
+            if (item.status === 'resolving' || item.status === 'downloading') {
+              return { ...item, status: 'queued', error: '' };
+            }
+            return item;
+          });
+        }
+      }
+    } catch {
+      /* ignore storage read errors */
+    }
+    return [];
+  });
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isArchiving, setIsArchiving] = useState(false);
+
+  // Global Drag & Drop state
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
 
   // Carousel modal state
   const [carouselOpen, setCarouselOpen] = useState(false);
@@ -262,6 +288,7 @@ function App() {
   const processingRef = useRef(false);
   const queueRef = useRef([]);
   const currentIdxRef = useRef(-1);
+  const runQueueRef = useRef(null);
   // PWA install prompt state
   const [installPrompt, setInstallPrompt] = useState(null);
 
@@ -293,7 +320,96 @@ function App() {
     }
   };
 
-  useEffect(() => { queueRef.current = queue; }, [queue]);
+  // Sync queue to localStorage & queueRef
+  useEffect(() => {
+    queueRef.current = queue;
+    try {
+      if (queue.length > 0) {
+        localStorage.setItem('instasnip_queue_v2', JSON.stringify(queue));
+      } else {
+        localStorage.removeItem('instasnip_queue_v2');
+      }
+    } catch {
+      /* ignore storage write errors */
+    }
+  }, [queue]);
+
+  // ── Global Drag & Drop Handler (Digital Darkroom Ingestion) ────────────────
+  useEffect(() => {
+    const handleDragEnter = (e) => {
+      e.preventDefault();
+      dragCounterRef.current += 1;
+      if (e.dataTransfer && e.dataTransfer.types) {
+        setIsDragging(true);
+      }
+    };
+
+    const handleDragLeave = (e) => {
+      e.preventDefault();
+      dragCounterRef.current -= 1;
+      if (dragCounterRef.current <= 0) {
+        dragCounterRef.current = 0;
+        setIsDragging(false);
+      }
+    };
+
+    const handleDragOver = (e) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    };
+
+    const handleDrop = (e) => {
+      e.preventDefault();
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+
+      const text = e.dataTransfer.getData('text');
+      if (!text) return;
+
+      const parsed = parseUrls(text);
+      if (parsed.length === 0) return;
+
+      const validUrls = parsed.filter((u) => validateInstagramUrl(u));
+      if (validUrls.length === 0) return;
+
+      const now = Date.now();
+      const newItems = validUrls.map((url, idx) => ({
+        id: `${now}-${idx}-${Math.random().toString(36).slice(2)}`,
+        url: cleanInstagramUrl(url),
+        status: 'queued',
+        error: '',
+        startTime: null,
+      }));
+
+      setQueue((prev) => {
+        const merged = [...prev, ...newItems];
+        queueRef.current = merged;
+        return merged;
+      });
+
+      if (!processingRef.current && !carouselOpen) {
+        const startIdx = queueRef.current.length;
+        processingRef.current = true;
+        setIsProcessing(true);
+        currentIdxRef.current = startIdx;
+        setTimeout(() => runQueueRef.current?.(startIdx), 80);
+      }
+    };
+
+    window.addEventListener('dragenter', handleDragEnter);
+    window.addEventListener('dragleave', handleDragLeave);
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+
+    return () => {
+      window.removeEventListener('dragenter', handleDragEnter);
+      window.removeEventListener('dragleave', handleDragLeave);
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, [carouselOpen]);
 
   // ── URL input management ──────────────────────────────────────────────────
   const addUrl = () => setUrls((prev) => [...prev, '']);
@@ -341,6 +457,11 @@ function App() {
 
   const clearQueue = () => {
     setQueue([]);
+    try {
+      localStorage.removeItem('instasnip_queue_v2');
+    } catch {
+      /* ignore */
+    }
     setIsProcessing(false);
     processingRef.current = false;
     currentIdxRef.current = -1;
@@ -352,11 +473,13 @@ function App() {
     const validUrls = urls.map((u) => u.trim()).filter((u) => u.length > 0);
     if (validUrls.length === 0) return;
 
+    const now = Date.now();
     const newItems = validUrls.map((url, idx) => ({
-      id: `${Date.now()}-${idx}-${Math.random().toString(36).slice(2)}`,
+      id: `${now}-${idx}-${Math.random().toString(36).slice(2)}`,
       url: cleanInstagramUrl(url),
       status: 'queued',
       error: '',
+      startTime: null,
     }));
 
     const merged = [...queue, ...newItems];
@@ -369,7 +492,58 @@ function App() {
       processingRef.current = true;
       setIsProcessing(true);
       currentIdxRef.current = startIdx;
-      setTimeout(() => runQueue(startIdx), 80);
+      setTimeout(() => runQueueRef.current?.(startIdx), 80);
+    }
+  };
+
+  // ── Master Session Archive (Smart Scrapbook ZIP) ───────────────────────────
+  const handleDownloadMasterArchive = async () => {
+    const successItems = queue.filter((item) => item.status === 'success' && item.downloadUrl);
+    if (successItems.length === 0 || isArchiving) return;
+
+    setIsArchiving(true);
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder('InstaSnip_Media');
+      const manifest = [];
+      manifest.push('==================================================');
+      manifest.push('InstaSnip Digital Darkroom — Session Media Archive');
+      manifest.push(`Export Date  : ${new Date().toISOString()}`);
+      manifest.push(`Total Items  : ${successItems.length}`);
+      manifest.push('==================================================\n');
+
+      for (let i = 0; i < successItems.length; i++) {
+        const item = successItems[i];
+        const ext = guessExtension(item.downloadUrl, item.downloadName);
+        const filename = `frame_${String(i + 1).padStart(2, '0')}.${ext}`;
+
+        manifest.push(`[FRAME #${String(i + 1).padStart(2, '0')}]`);
+        manifest.push(`File Name   : ${filename}`);
+        manifest.push(`Origin URL  : ${item.url}`);
+        manifest.push(`Media Link  : ${item.downloadUrl}`);
+        manifest.push('');
+
+        try {
+          const res = await fetch(item.downloadUrl);
+          if (res.ok) {
+            const blob = await res.blob();
+            folder.file(filename, blob);
+          }
+        } catch (fetchErr) {
+          console.warn(`Could not include direct stream blob for ${item.url}:`, fetchErr);
+        }
+      }
+
+      folder.file('manifest.txt', manifest.join('\n'));
+
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const archiveName = `InstaSnip_Session_${Date.now()}.zip`;
+      saveAs(zipBlob, archiveName);
+    } catch (err) {
+      console.error('Master archive creation error:', err);
+      alert('Failed to bundle session archive: ' + err.message);
+    } finally {
+      setIsArchiving(false);
     }
   };
 
@@ -386,7 +560,7 @@ function App() {
       processingRef.current = true;
       setIsProcessing(true);
       currentIdxRef.current = targetIdx;
-      setTimeout(() => runQueue(targetIdx), 80);
+      setTimeout(() => runQueueRef.current?.(targetIdx), 80);
     }
   };
 
@@ -407,7 +581,7 @@ function App() {
       processingRef.current = true;
       setIsProcessing(true);
       currentIdxRef.current = lowestIdx;
-      setTimeout(() => runQueue(lowestIdx), 80);
+      setTimeout(() => runQueueRef.current?.(lowestIdx), 80);
     }
   };
 
@@ -431,7 +605,7 @@ function App() {
         }
         
         currentIdxRef.current = idx;
-        setItemStatus(item.id, 'resolving');
+        setItemStatus(item.id, 'resolving', '', { startTime: Date.now() });
 
         try {
           const needsPause = await processItem(item);
@@ -460,6 +634,10 @@ function App() {
       }
     }
   };
+
+  useEffect(() => {
+    runQueueRef.current = runQueue;
+  });
 
   // ── Process a single queue item ───────────────────────────────────────────
   const processItem = async (item) => {
@@ -662,7 +840,6 @@ function App() {
         // Single item, just download it directly
         const slide = selected[0];
         const ext = guessExtension(slide.url, slide.type);
-        // eslint-disable-next-line react-hooks/purity
         const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(slide.url, filename);
         setItemStatus(carouselQueueId, 'success', '', {
@@ -676,7 +853,6 @@ function App() {
         for (let i = 0; i < selected.length; i++) {
           const slide = selected[i];
           const ext = guessExtension(slide.url, slide.type);
-          // eslint-disable-next-line react-hooks/purity
           const filename = `instagram_${Date.now()}_${i + 1}.${ext}`;
           
           // Fetch the blob to add to zip
@@ -687,7 +863,6 @@ function App() {
         }
         
         const zipBlob = await zip.generateAsync({ type: 'blob' });
-        // eslint-disable-next-line react-hooks/purity
         const zipFilename = `instagram_carousel_${Date.now()}.zip`;
         const zipUrl = URL.createObjectURL(zipBlob);
         
@@ -706,7 +881,7 @@ function App() {
     const nextIdx = currentIdxRef.current + 1;
     processingRef.current = true;
     setIsProcessing(true);
-    runQueue(nextIdx);
+    runQueueRef.current?.(nextIdx);
   };
 
   // ── Carousel cancelled ────────────────────────────────────────────────────
@@ -719,7 +894,7 @@ function App() {
     const nextIdx = currentIdxRef.current + 1;
     processingRef.current = true;
     setIsProcessing(true);
-    runQueue(nextIdx);
+    runQueueRef.current?.(nextIdx);
   };
 
   // ── Derived UI state ──────────────────────────────────────────────────────
@@ -864,18 +1039,56 @@ function App() {
         return (
           <section className="main-card queue-section" aria-label="Download queue">
             <div className="queue-header">
-              <h3 className="queue-title">Download Queue</h3>
-              <span className="media-count">
-                {completedCount} / {queue.length} done
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <h3 className="queue-title">Download Queue</h3>
+                <span className="media-count">
+                  {completedCount} / {queue.length} done
+                </span>
+              </div>
+              <div className="queue-header-actions">
+                {completedCount >= 2 && (
+                  <button
+                    type="button"
+                    className="btn-master-archive"
+                    onClick={handleDownloadMasterArchive}
+                    disabled={isArchiving}
+                    title="Bundle all completed media into a single session ZIP archive"
+                  >
+                    {isArchiving ? (
+                      <><Loader2 className="spinner" size={13} /> Archiving…</>
+                    ) : (
+                      <><Archive size={13} /> Download Session Archive (.zip)</>
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
 
             <ul className="queue-list">
               {queue.map((item, idx) => (
                 <li key={item.id} className={`queue-card status-${item.status}`}>
+                  <div className="film-perforation-strip" aria-hidden="true">
+                    <span className="film-hole" />
+                    <span className="film-hole" />
+                    <span className="film-hole" />
+                    <span className="film-hole" />
+                    <span className="film-hole" />
+                    <span className="film-hole" />
+                  </div>
                   <div className="card-top">
                     <div className="card-url-info">
-                      <span className="card-index">#{idx + 1}</span>
+                      <div className="card-meta-line">
+                        <span className="card-index">FRAME // {String(idx + 1).padStart(2, '0')}</span>
+                        {(item.status === 'resolving' || item.status === 'downloading') && (
+                          <ElapsedTimer startTime={item.startTime} />
+                        )}
+                        {item.status === 'resolving' && (
+                          <span className="telemetry-tag">TUNNEL CONNECTING</span>
+                        )}
+                        {item.status === 'downloading' && (
+                          <span className="telemetry-tag">STREAMING CHUNKS</span>
+                        )}
+                      </div>
                       <span className="card-url" title={item.url}>{item.url}</span>
                     </div>
                     <span className={`badge badge-${item.status}`}>
@@ -937,6 +1150,25 @@ function App() {
           </section>
         );
       })()}
+
+      {/* ── Global Darkroom Dropzone Overlay ─────────────────────────── */}
+      {isDragging && (
+        <div className="darkroom-dropzone-overlay" aria-live="polite">
+          <div className="darkroom-dropzone-box">
+            <div className="dropzone-icon-glow">
+              <Layers size={36} />
+            </div>
+            <h3 className="dropzone-title">Drop Instagram Links Here</h3>
+            <p className="dropzone-subtitle">
+              Release anywhere to ingest posts, reels, or multiple links directly into the queue.
+            </p>
+            <div className="dropzone-chip">
+              <Sparkles size={13} />
+              <span>DIGITAL DARKROOM INGESTION</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Footer ─────────────────────────────────────────────────────── */}
       <footer className="app-footer">
