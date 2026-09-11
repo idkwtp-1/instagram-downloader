@@ -48,6 +48,7 @@ const ALLOWED_CDN_DOMAINS = [
 
 // ─── Cloudflare Worker Edge Gateway (Zero file size limits & full CORS) ───────
 const GATEWAY_ENDPOINT = 'https://instasnip-gateway.ag299842-dbe.workers.dev/resolve';
+const GATEWAY_PROXY = 'https://instasnip-gateway.ag299842-dbe.workers.dev/proxy?url=';
 
 // ─── Verified Fast Community Cobalt Instances ────────────────────────────────
 const COBALT_INSTANCES = [
@@ -131,35 +132,29 @@ async function downloadBlob(mediaUrl, filename) {
 
   const isMobile = typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-  // 1. On mobile devices:
-  // Trigger direct native download immediately.
-  // Cobalt tunnels send Content-Disposition: attachment, prompting the OS download sheet directly without RAM exhaustion.
-  if (isMobile) {
-    try {
-      const anchor = document.createElement('a');
-      anchor.href = mediaUrl;
-      anchor.download = filename;
-      anchor.target = '_self';
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-      return;
-    } catch (e) {
-      console.warn('Mobile direct anchor click failed:', e);
-    }
-  }
-
-  // 2. On desktop: Try direct fetch with a 5s timeout to stream as Blob with custom filename
+  // 1. Try direct fetch first
   let res = null;
   try {
     res = await fetch(mediaUrl, {
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(4000),
     });
-  } catch (err) {
-    console.warn('Direct media fetch failed (CORS or timeout), using native download trigger:', err);
+  } catch {
+    // Direct fetch blocked by CORS or timed out
   }
 
-  // If blob fetch succeeded, create blob URL and trigger save dialog
+  // 2. If direct fetch failed (CORS), fetch through Edge Gateway streaming proxy
+  if (!res || !res.ok) {
+    try {
+      const proxyUrl = `${GATEWAY_PROXY}${encodeURIComponent(mediaUrl)}&filename=${encodeURIComponent(filename)}`;
+      res = await fetch(proxyUrl, {
+        signal: AbortSignal.timeout(30000),
+      });
+    } catch (proxyErr) {
+      console.warn('Edge Gateway proxy fetch failed:', proxyErr);
+    }
+  }
+
+  // 3. If blob fetch succeeded, create blob URL and trigger save dialog
   if (res && res.ok) {
     try {
       const blob = await res.blob();
@@ -178,9 +173,10 @@ async function downloadBlob(mediaUrl, filename) {
     }
   }
 
-  // 3. Universal Fallback: trigger native browser download
+  // 4. Universal Fallback: trigger browser download via proxy with Content-Disposition
+  const finalUrl = `${GATEWAY_PROXY}${encodeURIComponent(mediaUrl)}&filename=${encodeURIComponent(filename)}`;
   const anchor = document.createElement('a');
-  anchor.href = mediaUrl;
+  anchor.href = finalUrl;
   anchor.download = filename;
   anchor.target = isMobile ? '_self' : '_blank';
   anchor.rel = 'noopener noreferrer';
@@ -864,10 +860,24 @@ function App() {
           const ext = guessExtension(slide.url, slide.type);
           const filename = `instagram_${Date.now()}_${i + 1}.${ext}`;
           
-          // Fetch the blob to add to zip
-          const response = await fetch(slide.url);
-          if (!response.ok) throw new Error(`Failed to fetch media for zipping: ${response.statusText}`);
-          const blob = await response.blob();
+          // Fetch the blob to add to zip (direct, or via edge streaming proxy if CORS-blocked)
+          let blob = null;
+          try {
+            const response = await fetch(slide.url, { signal: AbortSignal.timeout(4000) });
+            if (response.ok) {
+              blob = await response.blob();
+            }
+          } catch {
+            /* Expected CORS block from Instagram CDN */
+          }
+
+          if (!blob) {
+            const proxyUrl = `${GATEWAY_PROXY}${encodeURIComponent(slide.url)}&filename=${encodeURIComponent(filename)}`;
+            const proxyRes = await fetch(proxyUrl, { signal: AbortSignal.timeout(20000) });
+            if (!proxyRes.ok) throw new Error(`Failed to fetch media for zipping: ${proxyRes.statusText}`);
+            blob = await proxyRes.blob();
+          }
+
           zip.file(filename, blob);
         }
         
@@ -1129,7 +1139,7 @@ function App() {
                   {item.status === 'success' && item.downloadUrl && (
                     <div className="card-actions-success">
                       <a
-                        href={item.downloadUrl}
+                        href={item.downloadUrl.startsWith('blob:') ? item.downloadUrl : `${GATEWAY_PROXY}${encodeURIComponent(item.downloadUrl)}&filename=${encodeURIComponent(item.downloadName || 'instagram_media')}`}
                         download={item.downloadName || 'instagram_media'}
                         target="_blank"
                         rel="noopener noreferrer"
