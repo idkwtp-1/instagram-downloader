@@ -34,6 +34,8 @@ const ALLOWED_CDN_DOMAINS = [
   'scontent.net',
   'facebook.com',
   'akamaihd.net',
+  'aelew.dev',
+  'workers.dev',
   'kittycat.boo',
   'xenon.zone',
   'cjs.nz',
@@ -44,13 +46,14 @@ const ALLOWED_CDN_DOMAINS = [
   'mgytr.top',
 ];
 
+// ─── Cloudflare Worker Edge Gateway (Zero file size limits & full CORS) ───────
+const GATEWAY_ENDPOINT = 'https://instasnip-gateway.ag299842-dbe.workers.dev/resolve';
+
 // ─── Verified Fast Community Cobalt Instances ────────────────────────────────
 const COBALT_INSTANCES = [
-  'https://rue-cobalt.xenon.zone',
-  'https://cobaltapi.kittycat.boo',
-  'https://dog.kittycat.boo',
-  'https://cobaltapi.cjs.nz',
+  'https://cobalt.aelew.dev',
   'https://api.cobalt.liubquanti.click',
+  'https://cobaltapi.cjs.nz',
 ];
 
 // Extract hostnames from Cobalt instances to allow proxied/tunneled downloads
@@ -648,13 +651,44 @@ function App() {
       );
     }
 
-    // Try Cobalt first
+    // 1. Try Cloudflare Worker Edge Gateway first (high-speed, zero size limit, full CORS)
     let data = null;
     let cobaltSucceeded = false;
     let lastError = '';
 
     try {
-      let apiResponse = null;
+      const gwRes = await fetch(GATEWAY_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({
+          url: item.url,
+          videoQuality: '1080',
+          filenameStyle: 'pretty',
+          downloadMode: 'auto',
+        }),
+        signal: AbortSignal.timeout(20000),
+      });
+
+      if (gwRes.ok) {
+        const gwJson = await gwRes.json();
+        if (gwJson && gwJson.status !== 'error') {
+          data = gwJson;
+          cobaltSucceeded = true;
+        } else if (gwJson?.error?.code) {
+          lastError = `Gateway: ${gwJson.error.code}`;
+        }
+      } else {
+        lastError = `Gateway HTTP ${gwRes.status}`;
+      }
+    } catch (gwErr) {
+      lastError = `Gateway unreachable: ${gwErr.message}`;
+    }
+
+    // 2. Secondary fallback: direct community instances
+    if (!cobaltSucceeded) {
       for (const instance of COBALT_INSTANCES) {
         try {
           const res = await fetch(`${instance}/`, {
@@ -662,55 +696,30 @@ function App() {
             headers: {
               'Content-Type': 'application/json',
               Accept: 'application/json',
+              'User-Agent': 'raycast-cobalt/20241120',
+              'Authorization': 'Api-Key 00000000-0000-4000-a000-000000000000',
             },
             body: JSON.stringify({
               url: item.url,
               videoQuality: '1080',
               filenameStyle: 'pretty',
               downloadMode: 'auto',
-              alwaysProxy: true,
             }),
-            signal: AbortSignal.timeout(25000), // increased to 25s per instance
+            signal: AbortSignal.timeout(15000),
           });
 
-          if (res.status === 429) {
-            lastError = `Rate limited by ${instance}. Trying next…`;
-            continue;
-          }
-
-          if (!res.ok) {
-            let cobaltMsg = '';
-            try {
-              const errBody = await res.clone().json();
-              cobaltMsg = errBody?.error?.code || errBody?.text || '';
-            } catch {
-              /* ignore json parse failure */
+          if (res.ok) {
+            const instJson = await res.json();
+            if (instJson && instJson.status !== 'error') {
+              data = instJson;
+              cobaltSucceeded = true;
+              break;
             }
-            lastError = cobaltMsg
-              ? `${instance} → ${cobaltMsg}`
-              : `${instance} returned HTTP ${res.status}.`;
-            continue;
           }
-
-          apiResponse = res;
-          break;
         } catch (fetchErr) {
           lastError = `${instance} unreachable: ${fetchErr.message}`;
         }
       }
-
-      if (apiResponse) {
-        data = await apiResponse.json();
-        if (data && data.status !== 'error') {
-          cobaltSucceeded = true;
-        } else if (data && data.status === 'error') {
-          lastError = `Cobalt API error: ${data.error?.code || 'unknown'}`;
-        }
-      } else {
-        lastError = lastError || 'All Cobalt instances failed to respond.';
-      }
-    } catch (e) {
-      lastError = e.message;
     }
 
     if (cobaltSucceeded && data) {
