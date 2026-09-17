@@ -35,44 +35,58 @@ export default {
           });
         }
 
-        const cleanUrl = parsedBody.url ? parsedBody.url.replace(/[?#].*$/, "") : "";
+        let targetUrl = parsedBody.url || "";
+        try {
+          const parsed = new URL(targetUrl);
+          const searchParams = new URLSearchParams(parsed.search);
+          const TRACKING_QUERY_PARAMS = new Set([
+            'igsh', 'igshid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'fbclid', 'src', 'ref'
+          ]);
+          for (const key of [...searchParams.keys()]) {
+            const lower = key.toLowerCase();
+            if (TRACKING_QUERY_PARAMS.has(lower) || lower.startsWith('utm_')) {
+              searchParams.delete(key);
+            }
+          }
+          const remaining = searchParams.toString();
+          parsed.search = remaining ? `?${remaining}` : '';
+          targetUrl = parsed.toString();
+        } catch {
+          // Keep raw URL if parsing fails
+        }
+
         const payload = JSON.stringify({
-          url: cleanUrl || parsedBody.url,
+          url: targetUrl,
           videoQuality: parsedBody.videoQuality || "1080",
           filenameStyle: "pretty",
           downloadMode: "auto",
         });
 
-        // ── Tier 1: Dedicated high-speed Cobalt backend (aelew) ──
-        try {
-          const res1 = await fetch("https://cobalt.aelew.dev/", {
-            method: "POST",
+        // ── Resilient Multi-Node Resolver Pool ──
+        const RESOLVER_NODES = [
+          {
+            name: "cobalt-aelew",
+            url: "https://cobalt.aelew.dev/",
             headers: {
               "Content-Type": "application/json",
               "Accept": "application/json",
               "User-Agent": "raycast-cobalt/20241120",
               "Authorization": "Api-Key 00000000-0000-4000-a000-000000000000",
             },
-            body: payload,
-          });
-
-          if (res1.ok) {
-            const data = await res1.json();
-            if (data && data.status !== "error") {
-              return new Response(JSON.stringify(data), {
-                status: 200,
-                headers: { ...corsHeaders, "Content-Type": "application/json" },
-              });
-            }
-          }
-        } catch (errTier1) {
-          console.warn("Tier 1 resolver error:", errTier1.message);
-        }
-
-        // ── Tier 2: Community Cobalt relay fallback ──
-        try {
-          const res2 = await fetch("https://api.cobalt.liubquanti.click/", {
-            method: "POST",
+          },
+          {
+            name: "cobalt-cjs",
+            url: "https://cobaltapi.cjs.nz/",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "User-Agent": "raycast-cobalt/20241120",
+              "Authorization": "Api-Key 00000000-0000-4000-a000-000000000000",
+            },
+          },
+          {
+            name: "cobalt-liubquanti",
+            url: "https://api.cobalt.liubquanti.click/",
             headers: {
               "Content-Type": "application/json",
               "Accept": "application/json",
@@ -80,23 +94,45 @@ export default {
               "Referer": "https://cobalt.liubquanti.click/",
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             },
-            body: payload,
-          });
+          },
+        ];
 
-          const data2Text = await res2.text();
-          return new Response(data2Text, {
-            status: res2.status,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        } catch (errTier2) {
-          return new Response(JSON.stringify({
-            status: "error",
-            error: { code: "error.gateway_upstream_failed", context: { message: errTier2.message } }
-          }), {
-            status: 502,
-            headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
+        let lastError = null;
+        for (const node of RESOLVER_NODES) {
+          try {
+            const nodeRes = await fetch(node.url, {
+              method: "POST",
+              headers: node.headers,
+              body: payload,
+            });
+
+            if (nodeRes.ok) {
+              const data = await nodeRes.json();
+              if (data && data.status !== "error") {
+                return new Response(JSON.stringify(data), {
+                  status: 200,
+                  headers: { ...corsHeaders, "Content-Type": "application/json" },
+                });
+              } else if (data?.error) {
+                lastError = data;
+              }
+            } else {
+              try {
+                const errData = await nodeRes.json();
+                if (errData?.error) lastError = errData;
+              } catch {
+                lastError = { status: "error", error: { code: `http_${nodeRes.status}` } };
+              }
+            }
+          } catch (nodeErr) {
+            lastError = { status: "error", error: { code: "node_unreachable", context: { message: nodeErr.message } } };
+          }
         }
+
+        return new Response(JSON.stringify(lastError || { status: "error", error: { code: "all_resolvers_exhausted" } }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       } catch (outerErr) {
         return new Response(JSON.stringify({ status: "error", error: { code: outerErr.message } }), {
           status: 500,

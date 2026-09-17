@@ -68,7 +68,7 @@ const COBALT_HOSTS = COBALT_INSTANCES.map((url) => {
 
 // ─── RapidAPI Fallback Config ───────────────────────────────────────────────
 const RAPIDAPI_KEY = '535dfdf4e1msh2ab83333db11e44p1bbe3djsn8c8b360cb723';
-const RAPIDAPI_HOST = 'instagram120.p.rapidapi.com';
+const RAPIDAPI_HOST = 'instagram-scraper-api2.p.rapidapi.com';
 
 // ─── Security: Verify the media URL comes from a trusted CDN or Cobalt instance ──
 function verifyHost(urlStr) {
@@ -108,7 +108,21 @@ function validateInstagramUrl(url) {
   }
 }
 
-// Clean Instagram URLs by normalizing /reels/ and removing tracking query parameters
+// Tracking parameters commonly added by Instagram/Facebook/Meta
+const TRACKING_QUERY_PARAMS = new Set([
+  'igsh',
+  'igshid',
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_term',
+  'utm_content',
+  'fbclid',
+  'src',
+  'ref',
+]);
+
+// Clean Instagram URLs by normalizing /reels/ and removing tracking query parameters while preserving functional tokens (e.g. stkn)
 function cleanInstagramUrl(urlStr) {
   try {
     const extracted = extractInstagramUrl(urlStr);
@@ -116,7 +130,18 @@ function cleanInstagramUrl(urlStr) {
     if (url.hostname.includes('instagram.com') || url.hostname === 'ig.me') {
       // Normalize /reels/ to /reel/
       url.pathname = url.pathname.replace(/\/reels\//i, '/reel/');
-      url.search = '';
+      
+      const searchParams = new URLSearchParams(url.search);
+      const keysToDelete = [];
+      for (const key of searchParams.keys()) {
+        const lowerKey = key.toLowerCase();
+        if (TRACKING_QUERY_PARAMS.has(lowerKey) || lowerKey.startsWith('utm_')) {
+          keysToDelete.push(key);
+        }
+      }
+      keysToDelete.forEach((k) => searchParams.delete(k));
+      const remaining = searchParams.toString();
+      url.search = remaining ? `?${remaining}` : '';
     }
     return url.toString();
   } catch {
@@ -751,63 +776,86 @@ function App() {
     console.log(`Cobalt failed: ${lastError}. Falling back to RapidAPI...`);
     
     try {
-      const targetUrl = `https://${RAPIDAPI_HOST}/api/instagram/links?rapidapi-key=${RAPIDAPI_KEY}`;
+      const targetUrl = `https://${RAPIDAPI_HOST}/v1/post_info?code_or_id_or_url=${encodeURIComponent(item.url)}`;
       let res = null;
       try {
-        // Try direct fetch first (may succeed from localhost or if CORS is supported)
         res = await fetch(targetUrl, {
-          method: 'POST',
+          method: 'GET',
           headers: {
-            'Content-Type': 'application/json'
+            'X-RapidAPI-Key': RAPIDAPI_KEY,
+            'X-RapidAPI-Host': RAPIDAPI_HOST,
           },
-          body: JSON.stringify({
-            url: item.url
-          }),
-          signal: AbortSignal.timeout(30000), // increased to 30s
+          signal: AbortSignal.timeout(25000),
         });
       } catch (directErr) {
-        console.warn('Direct RapidAPI fetch failed, trying corsproxy.io...', directErr);
-        const proxiedUrl = `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`;
+        console.warn('Direct RapidAPI fetch failed, trying Edge Gateway proxy...', directErr);
+        const proxiedUrl = `${GATEWAY_PROXY}${encodeURIComponent(targetUrl)}`;
         res = await fetch(proxiedUrl, {
-          method: 'POST',
+          method: 'GET',
           headers: {
-            'Content-Type': 'application/json'
+            'X-RapidAPI-Key': RAPIDAPI_KEY,
+            'X-RapidAPI-Host': RAPIDAPI_HOST,
           },
-          body: JSON.stringify({
-            url: item.url
-          }),
-          signal: AbortSignal.timeout(30000), // increased to 30s
+          signal: AbortSignal.timeout(25000),
         });
       }
 
       if (!res.ok) {
+        if (res.status === 403) {
+          throw new Error(`RapidAPI subscription required or key expired (${RAPIDAPI_HOST})`);
+        }
         throw new Error(`RapidAPI returned status ${res.status}`);
       }
 
       const rapidData = await res.json();
-
-      // Parse RapidAPI format
-      if (!Array.isArray(rapidData) || rapidData.length === 0) {
-        throw new Error('RapidAPI returned invalid or empty data.');
-      }
-
       const slides = [];
-      for (const mediaItem of rapidData) {
-        if (mediaItem.urls && mediaItem.urls.length > 0) {
-          const targetUrl = mediaItem.urls[0].url;
-          const ext = mediaItem.urls[0].extension || '';
-          const type = (ext === 'mp4' || mediaItem.urls[0].name?.toLowerCase().includes('video')) ? 'video' : 'photo';
 
+      // Format A: Standard Instagram GraphQL/Scraper data object
+      if (rapidData?.data) {
+        const d = rapidData.data;
+        if (Array.isArray(d.carousel_media) && d.carousel_media.length > 0) {
+          for (const item of d.carousel_media) {
+            const vid = item.video_versions?.[0]?.url;
+            const img = item.image_versions?.items?.[0]?.url || item.image_versions2?.candidates?.[0]?.url;
+            slides.push({
+              type: vid ? 'video' : 'photo',
+              url: vid || img,
+              thumb: img || vid,
+            });
+          }
+        } else if (d.video_versions && d.video_versions.length > 0) {
           slides.push({
-            type,
-            url: targetUrl,
-            thumb: mediaItem.pictureUrl || targetUrl
+            type: 'video',
+            url: d.video_versions[0].url,
+            thumb: d.image_versions?.items?.[0]?.url || d.video_versions[0].url,
+          });
+        } else if (d.image_versions?.items?.length > 0) {
+          slides.push({
+            type: 'photo',
+            url: d.image_versions.items[0].url,
+            thumb: d.image_versions.items[0].url,
           });
         }
       }
 
+      // Format B: Legacy array format
+      if (slides.length === 0 && Array.isArray(rapidData)) {
+        for (const mediaItem of rapidData) {
+          if (mediaItem.urls && mediaItem.urls.length > 0) {
+            const targetUrl = mediaItem.urls[0].url;
+            const ext = mediaItem.urls[0].extension || '';
+            const type = (ext === 'mp4' || mediaItem.urls[0].name?.toLowerCase().includes('video')) ? 'video' : 'photo';
+            slides.push({
+              type,
+              url: targetUrl,
+              thumb: mediaItem.pictureUrl || targetUrl,
+            });
+          }
+        }
+      }
+
       if (slides.length === 0) {
-        throw new Error('No download links found in RapidAPI response.');
+        throw new Error('No download links found in fallback API response.');
       }
 
       if (slides.length === 1) {
