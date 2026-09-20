@@ -129,7 +129,51 @@ export default {
           }
         }
 
-        return new Response(JSON.stringify(lastError || { status: "error", error: { code: "all_resolvers_exhausted" } }), {
+        // ── Tier 3: OpenGraph HTML Metadata Fallback (For Age/Region-Restricted Posts) ──
+        try {
+          const htmlRes = await fetch(targetUrl, {
+            headers: {
+              "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Sec-Fetch-Dest": "document",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Site": "none",
+              "Upgrade-Insecure-Requests": "1"
+            },
+          });
+
+          if (htmlRes.ok) {
+            const htmlText = await htmlRes.text();
+            const ogImageMatch = htmlText.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i) || htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:image"/i);
+            const ogVideoMatch = htmlText.match(/<meta\s+property="og:video"\s+content="([^"]+)"/i) || htmlText.match(/<meta\s+content="([^"]+)"\s+property="og:video"/i);
+
+            const mediaUrl = ogVideoMatch?.[1] || ogImageMatch?.[1];
+            if (mediaUrl) {
+              const cleanMediaUrl = mediaUrl.replace(/&amp;/g, "&");
+              return new Response(JSON.stringify({
+                status: "redirect",
+                url: cleanMediaUrl,
+                filename: `instagram_${Date.now()}.${ogVideoMatch ? 'mp4' : 'jpg'}`,
+                isPartial: true,
+                warning: "Post has age or region restrictions. Cover image extracted successfully."
+              }), {
+                status: 200,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+          }
+        } catch (ogErr) {
+          console.warn("Tier 3 OG fallback error:", ogErr.message);
+        }
+
+        return new Response(JSON.stringify({
+          status: "error",
+          error: {
+            code: "error.age_or_region_restricted",
+            context: { message: "Instagram requires authentication to view full slides for this age/region restricted post." }
+          }
+        }), {
           status: 200,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });

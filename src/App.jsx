@@ -765,7 +765,8 @@ function App() {
         const ext = guessExtension(data.url, data.filename);
         const filename = `instagram_${Date.now()}.${ext}`;
         await downloadBlob(data.url, filename);
-        setItemStatus(item.id, 'success', '', { downloadUrl: data.url, downloadName: filename });
+        const warning = data.isPartial ? (data.warning || 'Age/region restricted post. Cover image saved.') : '';
+        setItemStatus(item.id, 'success', '', { downloadUrl: data.url, downloadName: filename, warning });
         return false;
       }
 
@@ -1166,6 +1167,11 @@ function App() {
                       {item.status === 'error' && <><AlertCircle size={12} /> Error</>}
                     </span>
                   </div>
+                  {item.warning && (
+                    <p className="warning-text" style={{ color: '#fbbf24', fontSize: '0.8rem', marginTop: '0.4rem' }}>
+                      ⚠️ {item.warning}
+                    </p>
+                  )}
                   {item.status === 'error' && (
                     <>
                       <p className="error-text">{item.error}</p>
