@@ -109,10 +109,19 @@ export default {
             if (nodeRes.ok) {
               const data = await nodeRes.json();
               if (data && data.status !== "error") {
-                return new Response(JSON.stringify(data), {
-                  status: 200,
-                  headers: { ...corsHeaders, "Content-Type": "application/json" },
-                });
+                const isReelOrTv = targetUrl.includes('/reel/') || targetUrl.includes('/tv/');
+                const isImageResponse = data.filename && (data.filename.endsWith('.jpg') || data.filename.endsWith('.webp') || data.filename.endsWith('.png'));
+
+                if (isReelOrTv && isImageResponse) {
+                  // Cobalt silently failed to fetch the video and returned a cover image.
+                  // Treat as an error to force fallback to the next node.
+                  lastError = { status: "error", error: { code: "error.api.fetch.fallback_image_instead_of_video" } };
+                } else {
+                  return new Response(JSON.stringify(data), {
+                    status: 200,
+                    headers: { ...corsHeaders, "Content-Type": "application/json" },
+                  });
+                }
               } else if (data?.error) {
                 lastError = data;
               }
