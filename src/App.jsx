@@ -677,6 +677,13 @@ function App() {
     let cobaltSucceeded = false;
     let lastError = '';
 
+    const isReelOrTv = item.url.includes('/reel/') || item.url.includes('/tv/');
+    const isImageResponse = (resData) => {
+      if (!resData) return false;
+      const fn = (resData.filename || '').toLowerCase();
+      return fn.endsWith('.jpg') || fn.endsWith('.jpeg') || fn.endsWith('.webp') || fn.endsWith('.png');
+    };
+
     try {
       const gwRes = await fetch(GATEWAY_ENDPOINT, {
         method: 'POST',
@@ -696,8 +703,12 @@ function App() {
       if (gwRes.ok) {
         const gwJson = await gwRes.json();
         if (gwJson && gwJson.status !== 'error') {
-          data = gwJson;
-          cobaltSucceeded = true;
+          if (isReelOrTv && isImageResponse(gwJson)) {
+            lastError = 'Gateway returned cover image fallback for reel; trying secondary nodes...';
+          } else {
+            data = gwJson;
+            cobaltSucceeded = true;
+          }
         } else if (gwJson?.error?.code) {
           lastError = `Gateway: ${gwJson.error.code}`;
         }
@@ -732,6 +743,10 @@ function App() {
           if (res.ok) {
             const instJson = await res.json();
             if (instJson && instJson.status !== 'error') {
+              if (isReelOrTv && isImageResponse(instJson)) {
+                lastError = `${instance} returned cover image for reel; trying next node...`;
+                continue;
+              }
               data = instJson;
               cobaltSucceeded = true;
               break;
